@@ -14,7 +14,9 @@ docker run --rm --env-file provider.env \
   -p 8080:8080 -p 9999:9999 -p 3636:3636 \
   arkeonetwork/provider-core:dev
 ```
-- Admin UI: http://localhost:8080
+- Admin UI: http://localhost:8080/index.html  
+- Admin API: http://localhost:9999  
+- Sentinel metadata: http://localhost:3636/metadata.json
 
 ## Environment
 Copy `provider.env` and set at least:
@@ -45,6 +47,14 @@ ADMIN_API_PORT=9999
 
 The UI also persists sentinel values in `config/sentinel.env` and `config/sentinel.yaml`.
 
+## Pull from GHCR (once published)
+```bash
+docker pull ghcr.io/arkeonetwork/provider-core:latest
+docker run --rm --env-file provider.env \
+  -p 8080:8080 -p 9999:9999 -p 3636:3636 \
+  ghcr.io/arkeonetwork/provider-core:latest
+```
+
 ## Workflow
 1) Start container (above).  
 2) Open the Admin UI.  
@@ -54,3 +64,4 @@ The UI also persists sentinel values in `config/sentinel.env` and `config/sentin
 ## Notes
 - Exposed ports: 8080 (web), 9999 (admin API), 3636 (sentinel). Adjust `-p` as needed.
 - Sentinel YAML lives at `/app/config/sentinel.yaml`; services are added/removed by the Provider Services form (inactive services are removed; a placeholder is only kept when no services remain).
+- Provider claims are auto-triggered every 30 minutes inside the container via `/api/provider-claims` (see `claim_cron.sh`). Override interval with `CLAIM_CRON_INTERVAL` env var if needed.

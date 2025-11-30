@@ -46,7 +46,9 @@ COPY config/ /app/config/
 COPY admin/ /app/admin/
 COPY admin_api.py /app/admin_api.py
 COPY run_sentinel.sh /app/run_sentinel.sh
+COPY claim_cron.sh /app/claim_cron.sh
 RUN chmod +x /app/run_sentinel.sh
+RUN chmod +x /app/claim_cron.sh
 
 # Supervisor + entrypoint
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf

@@ -1206,6 +1206,10 @@ def sentinel_config():
         "PROVIDER_CONFIG_STORE_LOCATION",
         "LOG_LEVEL",
         "PROVIDER_PUBKEY",
+        "ARKEOD_NODE",
+        "EXTERNAL_ARKEOD_NODE",
+        "SENTINEL_NODE",
+        "SENTINEL_PORT",
     ]
     env_data = {k.lower(): os.getenv(k) for k in env_keys}
     env_file = _load_env_file(SENTINEL_ENV_PATH)
@@ -1305,6 +1309,141 @@ def update_sentinel_config():
             "restart_output": restart_output,
         }
     )
+
+
+@app.post("/api/provider-claims")
+def provider_claims():
+    """Submit open claims via arkeod using current provider env/config."""
+    # Derive provider account address
+    key_cmd = ["arkeod", "--home", ARKEOD_HOME, "keys", "show", KEY_NAME, "--bech", "acc", "--keyring-backend", KEYRING, "--address"]
+    code, out = run_list(key_cmd)
+    if code != 0:
+        return jsonify({"error": "failed to get provider address", "detail": out}), 500
+    provider_account = out.strip()
+
+    # Sentinel API (open-claims / mark-claimed)
+    sentinel_port = os.getenv("SENTINEL_PORT") or "3636"
+    sentinel_host = os.getenv("SENTINEL_BIND_HOST") or "127.0.0.1"
+    sentinel_api = f"http://{sentinel_host}:{sentinel_port}"
+
+    # Fetch open claims
+    try:
+        with urllib.request.urlopen(f"{sentinel_api}/open-claims", timeout=10) as resp:
+            claims_raw = resp.read().decode("utf-8")
+            claims = json.loads(claims_raw)
+    except Exception as e:
+        return jsonify({"error": "failed to fetch open claims", "detail": str(e)}), 500
+    pending = [c for c in claims if isinstance(c, dict) and (not c.get("claimed"))]
+    if not pending:
+        return jsonify({"status": "ok", "message": "No open claims to process.", "claims_processed": 0, "results": []})
+
+    results = []
+
+    def current_sequence():
+        qcmd = ["arkeod", "--home", ARKEOD_HOME, "query", "auth", "account", provider_account, "-o", "json", *NODE_ARGS]
+        c, o = run_list(qcmd)
+        if c != 0:
+            return None, o
+        try:
+            data = json.loads(o)
+        except Exception:
+            return None, o
+        seq = (
+            data.get("account", {})
+            .get("base_account", {})
+            .get("sequence")
+            or data.get("account", {})
+            .get("value", {})
+            .get("sequence")
+            or data.get("account", {})
+            .get("sequence")
+        )
+        return seq, o
+
+    for claim in pending:
+        contract_id = claim.get("contract_id")
+        nonce = claim.get("nonce")
+        signature = claim.get("signature")
+        if contract_id is None or nonce is None or signature is None:
+            results.append({"claim": claim, "error": "missing fields"})
+            continue
+
+        seq, seq_raw = current_sequence()
+        if seq is None:
+            results.append({"claim": claim, "error": "failed to fetch sequence", "detail": seq_raw})
+            continue
+
+        def submit(seq_override):
+            cmd = [
+                "arkeod",
+                "--home",
+                ARKEOD_HOME,
+                "tx",
+                "arkeo",
+                "claim-contract-income",
+                str(contract_id),
+                str(nonce),
+                str(signature),
+                "nil",
+                "--from",
+                KEY_NAME,
+                "--keyring-backend",
+                KEYRING,
+                *CHAIN_ARGS,
+                *NODE_ARGS,
+                "--fees",
+                FEES_DEFAULT,
+                "--gas",
+                os.getenv("CLAIM_GAS", "120000"),
+                "--sequence",
+                str(seq_override),
+                "-b",
+                "sync",
+                "-y",
+                "-o",
+                "json",
+            ]
+            return run_list(cmd)
+
+        exit_code, tx_out = submit(seq)
+        tx_json = {}
+        try:
+            tx_json = json.loads(tx_out)
+        except Exception:
+            tx_json = {"raw": tx_out}
+
+        raw_log = ""
+        if isinstance(tx_json, dict):
+            raw_log = tx_json.get("raw_log") or tx_json.get("rawlog") or ""
+        if "account sequence mismatch" in str(raw_log):
+            expected = None
+            m = re.search(r"expected\s+(\d+)", str(raw_log))
+            if m:
+                expected = m.group(1)
+            if expected is not None:
+                exit_code, tx_out = submit(expected)
+                try:
+                    tx_json = json.loads(tx_out)
+                except Exception:
+                    tx_json = {"raw": tx_out}
+
+        # Mark claimed on sentinel if success code=0
+        code_val = tx_json.get("code") if isinstance(tx_json, dict) else None
+        if code_val == 0:
+            try:
+                req = urllib.request.Request(
+                    f"{sentinel_api}/mark-claimed",
+                    method="POST",
+                    data=json.dumps({"contract_id": contract_id, "nonce": nonce}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                urllib.request.urlopen(req, timeout=5).read()
+            except Exception:
+                pass
+
+        results.append({"claim": claim, "exit_code": exit_code, "tx": tx_json})
+
+    return jsonify({"status": "ok", "claims_processed": len(results), "results": results})
 
 
 if __name__ == "__main__":

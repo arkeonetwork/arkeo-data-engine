@@ -13,11 +13,17 @@
             <div id="headerDescription" class="muted" style="margin-top:-6px;"></div>
         </div>
         <div class="header-right">
-            <div id="headerPubkey" class="header-line">Provider Pubkey:</div>
-            <div id="headerBalance" class="header-line">Hotwallet Balance:</div>
-            <div id="headerBlock" class="header-line muted">Current Block:</div>
+            <div id="headerBalance" class="header-line"><strong>Hotwallet Balance:</strong></div>
+            <div id="headerBlock" class="header-line muted"><strong>Current Block:</strong></div>
             <div class="header-line fixed-pill"><span id="headerRefreshPill" class="status-badge status-warn" style="display:none;">Loading...</span></div>
         </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>External Access</h2>
+        <div id="headerPubkey" class="header-line"><strong>Provider Pubkey: </strong></div>
+        <div id="endpointList" class="muted" style="white-space: normal;"></div>
     </div>
 </div>
 
@@ -33,8 +39,10 @@
                     <button class="primary" onclick="controlSentinel('restart')">Restart Sentinel</button>
                     <button class="primary" onclick="controlSentinel('stop')">Stop Sentinel</button>
                     <button class="primary" onclick="controlSentinel('start')">Start Sentinel</button>
+                    <button class="primary" onclick="runProviderClaims()">Provider Claims</button>
                 </div>
                 <pre id="sentinelControlResult" style="display:none; margin-top:0; min-width:220px;"></pre>
+                <pre id="providerClaimsResult" style="display:none; margin-top:8px; min-width:220px;"></pre>
             </div>
         </div>
         <div class="col">
@@ -61,7 +69,7 @@
         <div class="col">
             <div class="steps">
                 <div class="step">
-                    <h3>Step 2: Add Provider Service</h3>
+                    <h3>Step 2: Add Provider Services</h3>
                     <p>Bond and configure provider services for the marketplace.</p>
                     <p class="muted">* Edits may take 1–2 blocks to appear in the dashboard as the blockchain refreshes. Let the interface refresh to see the latest changes.</p>
                     <a class="btn" href="provider.html">Open Provider Services Form</a>
@@ -131,9 +139,6 @@
                 "(unknown)";
             const balanceAmt = formatBalance(bal);
             const blockHeight = formatBlockHeight(height);
-            const shortPub = bech32Pubkey && bech32Pubkey.length > 12
-                ? `${bech32Pubkey.slice(0, 10)}...${bech32Pubkey.slice(-8)}`
-                : bech32Pubkey;
             const summaryEl = document.getElementById("providerSummary");
             if (summaryEl) summaryEl.innerHTML = "";
             const headerMonikerEl = document.getElementById("headerMoniker");
@@ -146,7 +151,7 @@
             if (headerBalanceEl) headerBalanceEl.textContent = `Hotwallet Balance: ${balanceAmt}`;
             if (headerBlockEl) headerBlockEl.textContent = `Current Block: ${blockHeight}`;
             if (headerPubEl) {
-                headerPubEl.innerHTML = `Provider Pubkey: <span class="inline"><span class="truncate" title="${bech32Pubkey}">${shortPub}</span> <button class="copy-btn" onclick="copyPubkey('${bech32Pubkey}')">Copy</button></span>`;
+                headerPubEl.innerHTML = `<strong>Provider Pubkey:</strong> <span class="inline"><span>${bech32Pubkey}</span> <button class="copy-btn" onclick="copyPubkey('${bech32Pubkey}')">Copy</button></span>`;
             }
             const svcEl = document.getElementById("providerServices");
             const svcLookup = {};
@@ -167,6 +172,7 @@
             }
             providerServicesData = services && Array.isArray(services.services) ? services.services : [];
             const sentinelServices = [];
+            renderEndpointPanel(sentinelConfig, prov, envMeta);
             if (sentinelConfig && sentinelConfig.config && Array.isArray(sentinelConfig.config.services)) {
                 sentinelConfig.config.services.forEach(ss => {
                     if (!ss || typeof ss !== "object") return;
@@ -176,6 +182,7 @@
                     else if (sname) sentinelServices.push({ name: sname });
                 });
             }
+            renderEndpointPanel(sentinelConfig);
             if (providerServicesData && providerServicesData.length) {
                 const items = providerServicesData.map((s, idx) => {
                     let rawId = "";
@@ -342,8 +349,51 @@
                 resEl.textContent = `${action} failed: ${JSON.stringify(data)}`;
             }
         } catch (e) {
-            resEl.textContent = `${action} request error: ${e}`;
+                resEl.textContent = `${action} request error: ${e}`;
         }
+    }
+
+    async function runProviderClaims() {
+        const resEl = document.getElementById("providerClaimsResult");
+        if (resEl) {
+            resEl.style.display = "block";
+            resEl.textContent = "Running provider claims...";
+        }
+        try {
+            const res = await fetch("http://localhost:9999/api/provider-claims", { method: "POST" });
+            const data = await res.json();
+            if (res.ok) {
+                resEl.textContent = JSON.stringify(data, null, 2);
+            } else {
+                resEl.textContent = "Error: " + JSON.stringify(data, null, 2);
+            }
+        } catch (e) {
+            if (resEl) resEl.textContent = "Request failed: " + e;
+        }
+    }
+
+    function renderEndpointPanel(sCfg, provObj, envMeta) {
+        const el = document.getElementById("endpointList");
+        if (!el) return;
+        const envLower = (sCfg && sCfg.env) || {};
+        const envFile = (sCfg && sCfg.env_file) || {};
+        const pickEnv = (keyUpper) => {
+            const lower = keyUpper.toLowerCase();
+            return (envFile[keyUpper] ?? envLower[lower] ?? "");
+        };
+        const meta = (provObj && provObj.provider_metadata) || envMeta || {};
+        const pickMeta = (key) => meta[key] || meta[key.toUpperCase()] || meta[key.toLowerCase()] || "";
+
+        const arkeodNode = pickEnv("EXTERNAL_ARKEOD_NODE") || pickEnv("ARKEOD_NODE") || pickMeta("EXTERNAL_ARKEOD_NODE") || pickMeta("ARKEOD_NODE");
+        const restApi = pickEnv("ARKEO_REST_API_PORT") || pickEnv("PROVIDER_HUB_URI") || pickMeta("ARKEO_REST_API_PORT") || pickMeta("PROVIDER_HUB_URI");
+        const sentinelNode = pickEnv("SENTINEL_NODE") || pickMeta("SENTINEL_NODE");
+        const sentinelPort = pickEnv("SENTINEL_PORT") || pickMeta("SENTINEL_PORT") || "3636";
+        const sentinelFull = sentinelNode ? `${sentinelNode}:${sentinelPort}` : `(not set):${sentinelPort}`;
+        const lines = [];
+        lines.push(`<div><strong>Arkeo Node: </strong><span class="muted">${arkeodNode || "(not set)"}</span></div>`);
+        lines.push(`<div style="margin-top:6px;"><strong>Arkeo RPC: </strong><span class="muted">${restApi || "(not set)"}</span></div>`);
+        lines.push(`<div style="margin-top:6px;"><strong>Sentinel RPC: </strong><span class="muted">${sentinelFull}</span></div>`);
+        el.innerHTML = lines.join("");
     }
 
     async function getVersion() {
