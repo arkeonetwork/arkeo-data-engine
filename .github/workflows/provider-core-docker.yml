@@ -35,6 +35,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./provider-core
+          file: ./provider-core/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/provider-core:latest
