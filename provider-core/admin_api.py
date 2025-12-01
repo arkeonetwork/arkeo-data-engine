@@ -57,6 +57,38 @@ FEES_DEFAULT = os.getenv("TX_FEES") or "200uarkeo"
 API_PORT = int(os.getenv("ADMIN_API_PORT", "9999"))
 SENTINEL_CONFIG_PATH = os.getenv("SENTINEL_CONFIG_PATH", "/app/config/sentinel.yaml")
 SENTINEL_ENV_PATH = os.getenv("SENTINEL_ENV_PATH", "/app/config/sentinel.env")
+PROVIDER_ENV_PATH = os.getenv("PROVIDER_ENV_PATH", "/app/provider.env")
+ENV_EXPORT_KEYS = [
+    "PROVIDER_NAME",
+    "MONIKER",
+    "WEBSITE",
+    "DESCRIPTION",
+    "LOCATION",
+    "PORT",
+    "SOURCE_CHAIN",
+    "PROVIDER_HUB_URI",
+    "ARKEO_REST_API_PORT",
+    "EVENT_STREAM_HOST",
+    "FREE_RATE_LIMIT",
+    "FREE_RATE_LIMIT_DURATION",
+    "CLAIM_STORE_LOCATION",
+    "CONTRACT_CONFIG_STORE_LOCATION",
+    "PROVIDER_CONFIG_STORE_LOCATION",
+    "LOG_LEVEL",
+    "PROVIDER_PUBKEY",
+    "ARKEOD_NODE",
+    "EXTERNAL_ARKEOD_NODE",
+    "SENTINEL_NODE",
+    "SENTINEL_PORT",
+]
+SENTINEL_EXPORT_PATH = os.getenv("SENTINEL_EXPORT_PATH") or os.path.join(
+    os.path.dirname(SENTINEL_ENV_PATH) or ".",
+    "sentinel-export.json",
+)
+PROVIDER_EXPORT_PATH = os.getenv("PROVIDER_EXPORT_PATH") or os.path.join(
+    os.path.dirname(PROVIDER_ENV_PATH) or ".",
+    "provider-export.json",
+)
 
 
 def run(cmd: str) -> tuple[int, str]:
@@ -627,6 +659,9 @@ def provider_info():
     fees = FEES_DEFAULT
     bond = BOND_DEFAULT
 
+    export_bundle = _load_export_bundle()
+    provider_metadata = (export_bundle and export_bundle.get("env_file")) or _load_env_file(SENTINEL_ENV_PATH)
+
     base = provider_pubkeys_response(user, keyring_backend)
     base.update(
         {
@@ -635,7 +670,9 @@ def provider_info():
             "sentinel_uri": SENTINEL_URI_DEFAULT,
             "metadata_nonce": METADATA_NONCE_DEFAULT,
             "arkeod_node": ARKEOD_NODE,
-            "provider_metadata": _load_env_file(SENTINEL_ENV_PATH),
+            "provider_metadata": provider_metadata,
+            "provider_export": export_bundle,
+            "provider_export_path": PROVIDER_EXPORT_PATH,
         }
     )
     return jsonify(base)
@@ -964,6 +1001,54 @@ def _load_env_file(path: str) -> dict:
     return data
 
 
+def _load_export_bundle() -> dict | None:
+    """Load cached provider export if present."""
+    path = PROVIDER_EXPORT_PATH
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_export_bundle(
+    provider_form: dict | None = None,
+    env_file: dict | None = None,
+    sentinel_config_override: dict | None = None,
+    sentinel_config_raw_override: str | None = None,
+) -> dict:
+    """Persist a reusable config bundle next to provider.env."""
+    parsed_cfg, raw_cfg = _load_sentinel_config()
+    if sentinel_config_override is not None:
+        parsed_cfg = sentinel_config_override
+    if sentinel_config_raw_override is not None:
+        raw_cfg = sentinel_config_raw_override
+    if env_file is None:
+        env_file = _load_env_file(SENTINEL_ENV_PATH)
+    bundle = {
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "sentinel_env_path": SENTINEL_ENV_PATH,
+        "sentinel_config_path": SENTINEL_CONFIG_PATH,
+        "export_path": PROVIDER_EXPORT_PATH,
+        "sentinel_config": parsed_cfg,
+        "sentinel_config_raw": raw_cfg,
+        "env_file": env_file,
+    }
+    if provider_form:
+        bundle["provider_form"] = provider_form
+    try:
+        export_dir = os.path.dirname(PROVIDER_EXPORT_PATH)
+        if export_dir and not os.path.isdir(export_dir):
+            os.makedirs(export_dir, exist_ok=True)
+        with open(PROVIDER_EXPORT_PATH, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, indent=2)
+    except OSError:
+        pass
+    return bundle
+
+
 def _fetch_provider_services_internal(bech32_pubkey: str) -> list[dict]:
     """Return provider services for a given pubkey (lightweight helper)."""
     cmd = ["arkeod", "--home", ARKEOD_HOME]
@@ -1007,6 +1092,46 @@ def _fetch_provider_services_internal(bech32_pubkey: str) -> list[dict]:
     return services
 
 
+def _filter_sentinel_services_with_onchain(parsed_cfg: dict, bech32_pubkey: str) -> tuple[list[dict], list[str], list[dict]]:
+    """Filter sentinel services to include only on-chain active services for this provider."""
+    active = _fetch_provider_services_internal(bech32_pubkey)
+    active_ids: set[str] = set()
+    active_names: set[str] = set()
+    annotated: list[dict] = []
+    for s in active:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("id")
+        sname = s.get("name") or s.get("service")
+        status_val = s.get("status")
+        status_str = str(status_val).lower()
+        is_active = status_str in ("1", "active", "online", "true")
+        annotated.append({"id": sid, "name": sname, "status": status_val, "is_active": is_active})
+        if is_active:
+            if sid is not None:
+                active_ids.add(str(sid))
+            if sname:
+                active_names.add(str(sname).lower())
+    filtered = []
+    skipped = []
+    for svc in parsed_cfg.get("services") or []:
+        if not isinstance(svc, dict):
+            continue
+        sid = str(svc.get("id")) if svc.get("id") is not None else ""
+        sname = str(svc.get("name") or svc.get("service") or svc.get("type") or "")
+        sname_lower = sname.lower()
+        keep = False
+        if sid and sid in active_ids:
+            keep = True
+        if sname_lower and sname_lower in active_names:
+            keep = True
+        if keep:
+            filtered.append(svc)
+        else:
+            skipped.append(sname or sid or "(unknown)")
+    return filtered, skipped, annotated
+
+
 def _all_services_lookup() -> dict[str, str]:
     """Return a mapping of service id -> service name from arkeod all-services."""
     lookup: dict[str, str] = {}
@@ -1045,13 +1170,15 @@ def sentinel_rebuild():
         target = overrides[0] if isinstance(overrides[0], dict) else None
     if not target:
         return jsonify({"error": "no service override provided"}), 400
-    target_name = str(target.get("name") or target.get("service") or "").strip()
+    target_name = str(target.get("name") or target.get("service") or target.get("type") or "").strip()
     target_id = str(target.get("id") or target.get("service_id") or target.get("service") or "").strip()
+    target_name_lower = target_name.lower()
     if not target_name and not target_id:
         return jsonify({"error": "service name or id required"}), 400
     if not target_name and target_id:
         lookup = _all_services_lookup()
         target_name = lookup.get(target_id, "")
+        target_name_lower = target_name.lower()
     status_raw = str(target.get("status") or "").lower()
     should_remove = status_raw in ("0", "inactive", "offline")
 
@@ -1083,19 +1210,28 @@ def sentinel_rebuild():
         sid = str(entry.get("id") or entry.get("service_id") or entry.get("service") or "").strip()
         return name == "default-placeholder" or sid in ("0", 0)
 
+    def _svc_matches(svc: dict) -> bool:
+        if not isinstance(svc, dict):
+            return False
+        sid = str(svc.get("id")) if svc.get("id") is not None else ""
+        sname = str(svc.get("name") or svc.get("service") or svc.get("type") or "")
+        sname_lower = sname.lower()
+        stype_lower = str(svc.get("type") or "").lower()
+        if target_id and sid and target_id == sid:
+            return True
+        if target_name_lower and sname_lower and sname_lower == target_name_lower:
+            return True
+        if target_name_lower and stype_lower and stype_lower == target_name_lower:
+            return True
+        return False
+
     new_services = []
     updated = False
     for svc in existing_services:
         if not isinstance(svc, dict):
             new_services.append(svc)
             continue
-        sid = str(svc.get("id")) if svc.get("id") is not None else ""
-        sname = str(svc.get("name") or svc.get("service") or "")
-        match = False
-        if target_id and sid and target_id == sid:
-            match = True
-        if target_name and sname and target_name == sname:
-            match = True
+        match = _svc_matches(svc)
         if match:
             if should_remove:
                 updated = True
@@ -1120,6 +1256,9 @@ def sentinel_rebuild():
             updated = True
         else:
             new_services.append(svc)
+
+    if should_remove:
+        new_services = [svc for svc in new_services if not _svc_matches(svc)]
 
     if not updated and not should_remove:
         entry = {}
@@ -1190,31 +1329,9 @@ def sentinel_rebuild():
 @app.get("/api/sentinel-config")
 def sentinel_config():
     """Return sentinel-related env values and parsed sentinel.yaml if present."""
-    env_keys = [
-        "PROVIDER_NAME",
-        "MONIKER",
-        "WEBSITE",
-        "DESCRIPTION",
-        "LOCATION",
-        "PORT",
-        "SOURCE_CHAIN",
-        "PROVIDER_HUB_URI",
-        "ARKEO_REST_API_PORT",
-        "EVENT_STREAM_HOST",
-        "FREE_RATE_LIMIT",
-        "FREE_RATE_LIMIT_DURATION",
-        "CLAIM_STORE_LOCATION",
-        "CONTRACT_CONFIG_STORE_LOCATION",
-        "PROVIDER_CONFIG_STORE_LOCATION",
-        "LOG_LEVEL",
-        "PROVIDER_PUBKEY",
-        "ARKEOD_NODE",
-        "EXTERNAL_ARKEOD_NODE",
-        "SENTINEL_NODE",
-        "SENTINEL_PORT",
-    ]
-    env_data = {k.lower(): os.getenv(k) for k in env_keys}
-    env_file = _load_env_file(SENTINEL_ENV_PATH)
+    env_data = {k.lower(): os.getenv(k) for k in ENV_EXPORT_KEYS}
+    export_bundle = _load_export_bundle()
+    env_file = (export_bundle and export_bundle.get("env_file")) or _load_env_file(SENTINEL_ENV_PATH)
     parsed, raw = _load_sentinel_config()
     return jsonify(
         {
@@ -1224,6 +1341,153 @@ def sentinel_config():
             "config": parsed,
             "raw": raw,
             "sentinel_uri_default": SENTINEL_URI_DEFAULT,
+            "provider_export": export_bundle,
+            "provider_export_path": PROVIDER_EXPORT_PATH,
+        }
+    )
+
+
+@app.post("/api/provider-export")
+def export_provider_bundle():
+    """Write env + sentinel config + provider form cache to provider-export.json."""
+    bundle = _write_export_bundle()
+    try:
+        size = os.path.getsize(PROVIDER_EXPORT_PATH)
+    except OSError:
+        size = None
+    return jsonify(
+        {
+            "status": "ok",
+            "path": PROVIDER_EXPORT_PATH,
+            "bytes": size,
+            "export": bundle,
+        }
+    )
+
+
+@app.post("/api/provider-import")
+def import_provider_bundle():
+    """Import provider-export bundle from request body and persist it."""
+    payload = request.get_json(force=True, silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid payload"}), 400
+    sentinel_cfg_obj = payload.get("sentinel_config")
+    sentinel_cfg_raw = payload.get("sentinel_config_raw")
+    env_file = payload.get("env_file")
+    skipped_services = []
+
+    # Parse and filter sentinel.yaml if provided
+    parsed_cfg = None
+    raw_cfg = sentinel_cfg_raw
+    if sentinel_cfg_raw:
+        try:
+            parsed_cfg = yaml.safe_load(sentinel_cfg_raw) or {}
+        except Exception:
+            parsed_cfg = None
+    elif sentinel_cfg_obj:
+        parsed_cfg = sentinel_cfg_obj
+
+    bech32_pubkey = ""
+    try:
+        _, bech32_pubkey, _ = derive_pubkeys(KEY_NAME, KEYRING)
+    except Exception:
+        bech32_pubkey = ""
+
+    if parsed_cfg is not None and isinstance(parsed_cfg, dict):
+        filtered_services, skipped, annotated = _filter_sentinel_services_with_onchain(parsed_cfg, bech32_pubkey)
+        if filtered_services is not None:
+            parsed_cfg["services"] = filtered_services
+        skipped_services = skipped
+        try:
+            raw_cfg = yaml.safe_dump(parsed_cfg, sort_keys=False)
+        except Exception:
+            raw_cfg = sentinel_cfg_raw
+
+    if raw_cfg:
+        try:
+            with open(SENTINEL_CONFIG_PATH, "w", encoding="utf-8") as f:
+                f.write(raw_cfg)
+        except OSError as e:
+            return jsonify({"error": "failed to write sentinel config", "detail": str(e)}), 500
+    elif parsed_cfg is not None:
+        try:
+            with open(SENTINEL_CONFIG_PATH, "w", encoding="utf-8") as f:
+                yaml.safe_dump(parsed_cfg, f, sort_keys=False)
+        except OSError as e:
+            return jsonify({"error": "failed to write sentinel config", "detail": str(e)}), 500
+
+    # Write sentinel.env if provided
+    if isinstance(env_file, dict):
+        try:
+            with open(SENTINEL_ENV_PATH, "w", encoding="utf-8") as f:
+                for k, v in env_file.items():
+                    f.write(f"{k}={shlex.quote(str(v))}\n")
+        except OSError as e:
+            return jsonify({"error": "failed to write sentinel env", "detail": str(e)}), 500
+
+    restart_output = ""
+    try:
+        code, out = run_list([*SUPERVISORCTL, "restart", "sentinel"])
+        restart_output = out
+    except Exception as e:
+        restart_output = f"restart failed: {e}"
+
+    bundle = _write_export_bundle(
+        provider_form=payload.get("provider_form"),
+        sentinel_config_override=sentinel_cfg_obj,
+        sentinel_config_raw_override=sentinel_cfg_raw,
+        env_file=env_file if isinstance(env_file, dict) else None,
+    )
+    try:
+        size = os.path.getsize(PROVIDER_EXPORT_PATH)
+    except OSError:
+        size = None
+    return jsonify(
+        {
+            "status": "imported",
+            "path": PROVIDER_EXPORT_PATH,
+            "bytes": size,
+            "export": bundle,
+            "restart_output": restart_output,
+            "skipped_services": skipped_services,
+        }
+    )
+
+
+@app.post("/api/sentinel-sync")
+def sentinel_sync():
+    """Remove services from sentinel.yaml that are not active on-chain for this provider."""
+    _, bech32_pubkey, pub_err = derive_pubkeys(KEY_NAME, KEYRING)
+    if pub_err:
+        return jsonify({"error": pub_err}), 500
+    parsed, raw = _load_sentinel_config()
+    if parsed is None or not isinstance(parsed, dict):
+        return jsonify({"error": "sentinel config not found or invalid"}), 404
+    original_services = parsed.get("services") or []
+    filtered_services, skipped, annotated = _filter_sentinel_services_with_onchain(parsed, bech32_pubkey)
+    parsed["services"] = filtered_services
+    try:
+        with open(SENTINEL_CONFIG_PATH, "w", encoding="utf-8") as f:
+            yaml.safe_dump(parsed, f, sort_keys=False)
+    except OSError as e:
+        return jsonify({"error": "failed to write sentinel config", "detail": str(e)}), 500
+    restart_output = ""
+    try:
+        code, out = run_list([*SUPERVISORCTL, "restart", "sentinel"])
+        restart_output = out
+    except Exception as e:
+        restart_output = f"restart failed: {e}"
+    return jsonify(
+        {
+            "status": "synced",
+            "removed_services": skipped,
+            "onchain_services": annotated,
+            "original_services": original_services,
+            "filtered_services": filtered_services,
+            "sentinel_services_before": original_services,
+            "sentinel_services_after": filtered_services,
+            "restart_output": restart_output,
+            "sentinel_config_path": SENTINEL_CONFIG_PATH,
         }
     )
 

@@ -53,6 +53,8 @@
                     <button class="primary" onclick="controlSentinel('restart')">Restart Sentinel</button>
                     <button class="primary" onclick="controlSentinel('stop')">Stop Sentinel</button>
                     <button class="primary" onclick="controlSentinel('start')">Start Sentinel</button>
+                </div>
+                <div class="actions">
                     <button class="primary" onclick="runProviderClaims()">Provider Claims</button>
                     <button class="primary" onclick="runProviderTotals()">Provider Totals</button>
                 </div>
@@ -83,7 +85,7 @@
             <div class="steps">
                 <div class="step">
                     <h3>Step 2: Add Provider Services</h3>
-                    <p>Bond and configure provider services for the marketplace.</p>
+                    <p>Bond and modify provider services for the marketplace.</p>
                     <p class="muted">* Edits may take 1–2 blocks to appear in the dashboard as the blockchain refreshes. Let the interface refresh to see the latest changes.</p>
                     <a class="btn" href="provider.html">Open Provider Services Form</a>
                 </div>
@@ -94,7 +96,30 @@
 
 <div class="card">
     <h2>Access Points</h2>
-    <div id="endpointList" class="muted ws-normal"></div>
+
+    <div class="row">
+        <div class="col">
+            <div class="panel mb-12">
+
+                <div id="endpointList" class="muted ws-normal"></div>
+
+            </div>
+        </div>
+        <div class="col">
+            <div class="steps">
+                <div class="step">
+                    <h3>Step 3: Export</h3>
+                    <p>Export your configs to make it easier to update/restore your docker later.</p>
+                    <div class="actions">
+                        <button class="primary" onclick="runProviderExport()">Provider Export</button>
+                        <button class="primary" onclick="triggerProviderImport()">Provider Import</button>
+                        <input type="file" id="providerImportInput" class="hidden" accept="application/json" onchange="handleProviderImport(event)" />
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </div>
 
 <div class="card footer-card">
@@ -116,13 +141,22 @@
 
 <div class="card">
     <div class="section">
+
         <h3>Debug</h3>
-        <p id="version">Loading arkeod version...</p>
-        <span id="refreshBadge" class="status-badge status-warn hidden mb-8">Refreshing…</span>
-        <button class="primary" onclick="refreshInfo()">Refresh Info</button>
-        <pre id="debugInfo">Loading...</pre>
         <h4>Sentinel Status</h4>
         <pre id="sentinelStatus">Loading...</pre>
+        <h4>Sentinel Env (runtime)</h4>
+        <pre id="sentinelEnvStatus">Loading...</pre>
+        <h4>Sentinel YAML</h4>
+        <pre id="sentinelYamlStatus">Loading...</pre>
+
+        <h4>Debug</h4>
+        <button class="primary" onclick="refreshInfo()">Refresh Info</button>
+        <p id="version">Loading arkeod version...</p>
+        <span id="refreshBadge" class="status-badge status-warn hidden mb-8">Refreshing…</span>
+        <pre id="debugInfo">Loading...</pre>
+
+
     </div>
 </div>
 
@@ -135,6 +169,63 @@
 </div>
 
 <script>
+    const DEFAULT_ADMIN_API_PORT = "9999";
+    const DEFAULT_ADMIN_UI_PORT = "8080";
+    let adminHost = (window.location && window.location.hostname) || "localhost";
+    let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+
+    function buildBaseUrl(host, port) {
+        const proto = (window.location && window.location.protocol === "https:") ? "https:" : "http:";
+        const cleaned = (host || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
+        return `${proto}//${cleaned}${port ? `:${port}` : ""}`;
+    }
+
+    function extractHostFromValue(val) {
+        if (!val) return "";
+        try {
+            const u = val.startsWith("http") ? new URL(val) : new URL(`http://${val}`);
+            return u.hostname || "";
+        } catch (e) {
+            return "";
+        }
+    }
+
+    function setAdminHost(candidateHost) {
+        if (!candidateHost) return;
+        const cleaned = extractHostFromValue(candidateHost) || candidateHost;
+        if (cleaned && cleaned !== adminHost) {
+            adminHost = cleaned;
+            adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+        }
+    }
+
+    function resolveApi(path) {
+        if (!path.startsWith("/")) path = `/${path}`;
+        return `${adminApiBase}${path}`;
+    }
+
+    function isLocalHost(host) {
+        const h = (host || "").toLowerCase();
+        return h === "localhost" || h === "127.0.0.1" || h === "";
+    }
+
+    function updateHostFromConfig(sCfg, metaObj) {
+        const envLower = (sCfg && sCfg.env) || {};
+        const envFile = (sCfg && sCfg.env_file) || {};
+        const meta = metaObj || {};
+        const pickEnv = (keyUpper) => {
+            const lower = keyUpper.toLowerCase();
+            return (envFile[keyUpper] ?? envLower[lower] ?? "");
+        };
+        const pickMeta = (key) => meta[key] || meta[key.toUpperCase()] || meta[key.toLowerCase()] || "";
+        const adminHostOverride = pickEnv("ADMIN_HOST") || pickMeta("ADMIN_HOST");
+        const sentinelNode = pickEnv("SENTINEL_NODE") || pickMeta("SENTINEL_NODE");
+        const sentinelHost = extractHostFromValue(sentinelNode);
+        const currentIsLocal = isLocalHost(adminHost);
+        const chosen = adminHostOverride || (currentIsLocal ? sentinelHost : "");
+        setAdminHost(chosen || adminHost);
+    }
+
     let providerServicesData = [];
     let currentPubkey = "";
 
@@ -148,15 +239,15 @@
         try {
             const fetchNoStore = (url) => fetch(url, { cache: "no-store" });
             const [provRes, balRes, keyRes, svcRes, allSvcRes, sentRes, heightRes, sCfgRes, metaRes] = await Promise.allSettled([
-                fetchNoStore("http://localhost:9999/api/provider-info"),
-                fetchNoStore("http://localhost:9999/api/balance"),
-                fetchNoStore("http://localhost:9999/api/key"),
-                fetchNoStore("http://localhost:9999/api/provider-services"),
-                fetchNoStore("http://localhost:9999/api/services"),
-                fetchNoStore("http://localhost:9999/api/sentinel-status"),
-                fetchNoStore("http://localhost:9999/api/block-height"),
-                fetchNoStore("http://localhost:9999/api/sentinel-config"),
-                fetchNoStore("http://localhost:9999/api/sentinel-metadata?quiet=1"),
+                fetchNoStore(resolveApi("/api/provider-info")),
+                fetchNoStore(resolveApi("/api/balance")),
+                fetchNoStore(resolveApi("/api/key")),
+                fetchNoStore(resolveApi("/api/provider-services")),
+                fetchNoStore(resolveApi("/api/services")),
+                fetchNoStore(resolveApi("/api/sentinel-status")),
+                fetchNoStore(resolveApi("/api/block-height")),
+                fetchNoStore(resolveApi("/api/sentinel-config")),
+                fetchNoStore(resolveApi("/api/sentinel-metadata?quiet=1")),
             ]);
             const parseSafe = async (settled) => {
                 if (settled.status !== "fulfilled" || !settled.value) return { error: String(settled.reason || "request failed") };
@@ -182,6 +273,7 @@
             // Provider summary at top
             const metaCfg = (meta && meta.metadata && meta.metadata.config) || {};
             const envMeta = (prov && prov.provider_metadata) || {};
+            updateHostFromConfig(sentinelConfig, envMeta);
             const moniker =
                 metaCfg.moniker ||
                 metaCfg.provider_name ||
@@ -231,12 +323,14 @@
                     const rawId = s && (s.id ?? s.service_id ?? s.serviceID);
                     const key = rawId !== undefined && rawId !== null ? String(rawId) : "";
                     const name = s ? (s.name || s.service || s.label || "") : "";
+                    const desc = s ? (s.description || s.desc || s.label || "") : "";
                     if (key) {
-                        svcLookup[key] = name;
+                        const val = { name, description: desc, service: s.service };
+                        svcLookup[key] = val;
                         // also store numeric key variant to be safe
                         const numKey = Number(key);
                         if (!Number.isNaN(numKey)) {
-                            svcLookup[String(numKey)] = name;
+                            svcLookup[String(numKey)] = val;
                         }
                     }
                 });
@@ -270,14 +364,21 @@
 
                     let resolvedName = rawName;
                     const lookupById = rawId ? svcLookup[rawId] : "";
+                    // lookupById may be string or object; normalize
+                    const lookupName = lookupById && typeof lookupById === "object" ? (lookupById.name || lookupById.label || lookupById.service || "") : lookupById;
+                    const lookupDesc = lookupById && typeof lookupById === "object" ? lookupById.description : "";
                     if (!resolvedName || resolvedName === rawId || /^[0-9]+$/.test(resolvedName)) {
-                        resolvedName = lookupById || resolvedName || "(unknown service)";
+                        resolvedName = lookupName || resolvedName || "(unknown service)";
                     }
-                    if (!rawId && lookupById) {
-                        rawId = Object.keys(svcLookup).find(k => svcLookup[k] === lookupById) || "";
+                    if (!rawId && lookupName) {
+                        rawId = Object.keys(svcLookup).find(k => {
+                            const v = svcLookup[k];
+                            if (typeof v === "object") return v.name === lookupName || v.service === lookupName;
+                            return v === lookupName;
+                        }) || "";
                     }
+                    const resolvedDisplay = lookupDesc || resolvedName;
 
-                    const serviceIdLabel = rawId ? `Service ID: ${rawId}` : "Service ID: ?";
                     const statusVal = s && s.status;
                     const statusStr = statusVal === undefined ? "active" : String(statusVal).toLowerCase();
                     const isActive =
@@ -294,15 +395,18 @@
                         return idMatch || nameMatch;
                     });
                     const sentinelBadge = inSentinel
-                        ? '<span class="status-pill status-ok">Connected to Sentinel</span>'
-                        : '<span class="status-pill status-err">Missing from Sentinel</span>';
+                        ? '<span class="status-pill status-ok">In Sentinel</span>'
+                        : '<span class="status-pill status-err">Not in Sentinel</span>';
+                    const subtitle = rawId ? `${resolvedName} (${rawId})` : resolvedName;
                     return `
                         <div class="service-row full-width service-row-padded">
                             <div class="service-name full-width">
-                                <span class="status-pill ${statusClass}">${statusLabel}</span>
-                                <span class="service-pipe">|</span>
-                                ${resolvedName} ${rawId ? `(${rawId})` : ""}
-                                ${sentinelBadge}
+                                <div class="full-width"><strong>${resolvedDisplay}</strong></div>
+                                ${subtitle ? `<div class="full-width muted normal-weight">${subtitle}</div>` : ""}
+                                <div class="full-width mt-4">
+                                    <span class="status-pill ${statusClass}">${statusLabel}</span>
+                                    ${sentinelBadge}
+                                </div>
                             </div>
                             <div class="service-actions-row">
                                 <button class="primary" onclick="editService(${idx})">Edit</button>
@@ -322,6 +426,7 @@
                     balance: bal,
                     key: key,
                     sentinel_metadata: meta,
+                    sentinel_config: sentinelConfig,
                     provider_services: services,
                     all_services: allServices,
                     sentinel_status: sentinelStatus,
@@ -330,6 +435,16 @@
                 null,
                 2
             );
+            if (sentinelConfig && sentinelConfig.raw) {
+                const sentinelYamlEl = document.getElementById("sentinelYamlStatus");
+                if (sentinelYamlEl) {
+                    sentinelYamlEl.textContent = sentinelConfig.raw;
+                }
+                const sentinelEnvEl = document.getElementById("sentinelEnvStatus");
+                if (sentinelEnvEl && sentinelConfig.env_file) {
+                    sentinelEnvEl.textContent = JSON.stringify(sentinelConfig.env_file, null, 2);
+                }
+            }
             updateSentinelStatusDisplay(sentinelStatus);
         } catch (e) {
             debugEl.textContent = "Failed to load info: " + e;
@@ -452,7 +567,7 @@
 
     async function refreshSentinelStatus() {
         try {
-            const res = await fetch("http://localhost:9999/api/sentinel-status");
+            const res = await fetch(resolveApi("/api/sentinel-status"));
             const data = await res.json();
             updateSentinelStatusDisplay(data);
         } catch (e) {
@@ -464,7 +579,7 @@
     async function controlSentinel(action) {
         showResultModal("Sentinel Control", `Sending ${action}...`);
         try {
-            const res = await fetch("http://localhost:9999/api/sentinel-control", {
+            const res = await fetch(resolveApi("/api/sentinel-control"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ action }),
@@ -484,7 +599,7 @@
     async function runProviderClaims() {
         showResultModal("Provider Claims", "Running provider claims...");
         try {
-            const res = await fetch("http://localhost:9999/api/provider-claims", { method: "POST" });
+            const res = await fetch(resolveApi("/api/provider-claims"), { method: "POST" });
             const data = await res.json();
             if (res.ok) {
                 showResultModal("Provider Claims", JSON.stringify(data, null, 2));
@@ -499,7 +614,7 @@
     async function runProviderTotals() {
         showResultModal("Provider Totals", "Running provider totals...");
         try {
-            const res = await fetch("http://localhost:9999/api/provider-totals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+            const res = await fetch(resolveApi("/api/provider-totals"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
             const data = await res.json();
             if (res.ok) {
                 showResultModal("Provider Totals", JSON.stringify(data, null, 2));
@@ -508,6 +623,83 @@
             }
         } catch (e) {
             showResultModal("Provider Totals", "Request failed: " + e);
+        }
+    }
+
+    async function runProviderExport() {
+        showResultModal("Provider Export", "Exporting...");
+        try {
+            const res = await fetch(resolveApi("/api/provider-export"), { method: "POST" });
+            const data = await res.json();
+            if (res.ok) {
+                const content = JSON.stringify(data.export || data, null, 2);
+                const blob = new Blob([content], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "provider-export.json";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                showResultModal("Provider Export", `Exported to ${data.path || "(unknown)"}${data.bytes ? ` (${data.bytes} bytes)` : ""}`);
+            } else {
+                showResultModal("Provider Export", "Error: " + JSON.stringify(data, null, 2));
+            }
+        } catch (e) {
+            showResultModal("Provider Export", "Request failed: " + e);
+        }
+    }
+
+    function triggerProviderImport() {
+        const input = document.getElementById("providerImportInput");
+        if (input) input.click();
+    }
+
+    async function handleProviderImport(event) {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const json = JSON.parse(text);
+            showResultModal("Provider Import", "Uploading...");
+            const res = await fetch(resolveApi("/api/provider-import"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(json),
+            });
+            let data;
+            try {
+                data = await res.json();
+            } catch (e) {
+                const txt = await res.text().catch(() => "");
+                showResultModal("Provider Import", `Import error: non-JSON response (${res.status})\n${txt}`);
+                return;
+            }
+            if (res.ok) {
+                showResultModal("Provider Import", `Imported and cached to ${data.path || "(unknown)"}`);
+            } else {
+                showResultModal("Provider Import", "Import error: " + JSON.stringify(data, null, 2));
+            }
+        } catch (e) {
+            showResultModal("Provider Import", "Failed to import: " + e);
+        } finally {
+            event.target.value = "";
+        }
+    }
+
+    async function runSentinelSync() {
+        showResultModal("Sync Sentinel", "Syncing...");
+        try {
+            const res = await fetch(resolveApi("/api/sentinel-sync"), { method: "POST" });
+            const data = await res.json();
+            if (res.ok) {
+                showResultModal("Sync Sentinel", `Synced:\n${JSON.stringify(data, null, 2)}`);
+            } else {
+                showResultModal("Sync Sentinel", "Error: " + JSON.stringify(data, null, 2));
+            }
+        } catch (e) {
+            showResultModal("Sync Sentinel", "Request failed: " + e);
         }
     }
 
@@ -541,39 +733,44 @@
         const restApi = pickEnv("ARKEO_REST_API_PORT") || pickEnv("PROVIDER_HUB_URI") || pickMeta("ARKEO_REST_API_PORT") || pickMeta("PROVIDER_HUB_URI");
         const sentinelNode = pickEnv("SENTINEL_NODE") || pickMeta("SENTINEL_NODE");
         const sentinelPort = pickEnv("SENTINEL_PORT") || pickMeta("SENTINEL_PORT") || "3636";
+        const resolvedHost = extractHostFromValue(sentinelNode) || adminHost;
+        setAdminHost(resolvedHost);
         const sentinelFull = sentinelNode ? `${sentinelNode}:${sentinelPort}` : `(not set):${sentinelPort}`;
         const adminApiPort = pickEnv("ADMIN_API_PORT") || pickMeta("ADMIN_API_PORT") || "9999";
         const adminPort = pickEnv("ADMIN_PORT") || pickMeta("ADMIN_PORT") || "8080";
+        const adminApiUrl = buildBaseUrl(resolvedHost, adminApiPort);
+        const adminUiUrl = buildBaseUrl(resolvedHost, adminPort);
 
         const makeRow = (label, value, statusId) => {
             return `<div class="endpoint-row">
+                <strong>${label}: </strong><br>
                 <span id="${statusId}" class="status-dot warn"></span>
-                <strong>${label}: </strong><span class="muted endpoint-url">${value || "(not set)"}</span>
+                <span class="muted endpoint-url">${value || "(not set)"}</span>
             </div>`;
         };
 
         el.innerHTML = [
-            `<div class="endpoint-section-title"><strong>External Access</strong></div>`,
+            `<div class="endpoint-section-title"><h3>External Access</h3></div>`,
             makeRow("Arkeo Node", arkeodNode, "arkeod-status"),
             makeRow("Arkeo RPC", restApi, "arkeorpc-status"),
-            `<div class="endpoint-row"><strong>Sentinel RPC: </strong><span class="muted endpoint-url">${sentinelFull}</span></div>`,
-            `<div class="endpoint-section-title"><strong>Internal Access</strong></div>`,
+            `<div class="endpoint-row"><strong>Sentinel RPC (External): </strong><br><span class="muted endpoint-url">${sentinelFull}</span></div>`,
+            `<div class="endpoint-section-title"><h3>Internal Access</h3></div>`,
             makeRow("Sentinel RPC (Internal)", `http://localhost:${sentinelPort}`, "internal-sentinel-status"),
-            makeRow("Admin API", `http://localhost:${adminApiPort}/api/version`, "internal-adminapi-status"),
-            makeRow("Admin UI", `http://localhost:${adminPort}`, "internal-admin-status")
+            makeRow("Admin API", `${adminApiUrl}/api/version`, "internal-adminapi-status"),
+            makeRow("Admin UI", `${adminUiUrl}`, "internal-admin-status")
         ].join("");
 
         // Kick off reachability checks
         checkEndpoint("arkeod-status", arkeodNode, { pathOverride: "/health", allowOpaqueOk: true });
         checkEndpoint("arkeorpc-status", restApi, { pathOverride: "/cosmos/base/tendermint/v1beta1/node_info", allowOpaqueOk: true });
         checkEndpoint("internal-sentinel-status", `http://localhost:${sentinelPort}`, { pathOverride: "/metadata.json", allowOpaqueOk: true });
-        checkEndpoint("internal-adminapi-status", `http://localhost:${adminApiPort}/api/version`, { allowOpaqueOk: true });
-        checkEndpoint("internal-admin-status", `http://localhost:${adminPort}`, { allowOpaqueOk: true });
+        checkEndpoint("internal-adminapi-status", `${adminApiUrl}/api/version`, { allowOpaqueOk: true });
+        checkEndpoint("internal-admin-status", `${adminUiUrl}`, { allowOpaqueOk: true });
     }
 
     async function getVersion() {
         try {
-            let res = await fetch("http://localhost:9999/api/version");
+            let res = await fetch(resolveApi("/api/version"));
             let data = await res.json();
             if (data.arkeod_version) {
                 document.getElementById("version").textContent = "arkeod version: " + data.arkeod_version;

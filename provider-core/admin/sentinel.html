@@ -151,13 +151,6 @@
             <td class="value"><span id="bech32Pubkey">(loading...)</span></td>
         </tr>
         <tr>
-            <td class="label">
-                MetadataNonce
-                <div class="hint">Increment when updating provider metadata.</div>
-            </td>
-            <td class="value"><span id="metadataNonce">(loading...)</span></td>
-        </tr>
-        <tr>
             <td colspan="2" class="text-left pt-12 no-border">
                 <button class="primary" id="saveSentinelBtn" onclick="saveConfig()">Save Sentinel Config</button>
             </td>
@@ -188,7 +181,9 @@
     <h3>Debug Info</h3>
 
     <button class="primary" onclick="loadInfo()">Refresh</button>
+    <button class="primary" onclick="exportSentinelBundle()">Export Sentinel Config</button>
     <pre id="sentinelMeta">(loading...)</pre>
+    <pre id="exportResult" class="pre-wrap"></pre>
 
     <div class="panel mt-14">
         <h3>Sentinel YAML</h3>
@@ -205,6 +200,40 @@
 </div>
 
 <script>
+    const DEFAULT_ADMIN_API_PORT = "9999";
+    let adminHost = (window.location && window.location.hostname) || "localhost";
+    let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+
+    function buildBaseUrl(host, port) {
+        const proto = (window.location && window.location.protocol === "https:") ? "https:" : "http:";
+        const cleaned = (host || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
+        return `${proto}//${cleaned}${port ? `:${port}` : ""}`;
+    }
+
+    function extractHostFromValue(val) {
+        if (!val) return "";
+        try {
+            const u = val.startsWith("http") ? new URL(val) : new URL(`http://${val}`);
+            return u.hostname || "";
+        } catch (e) {
+            return "";
+        }
+    }
+
+    function setAdminHost(candidateHost) {
+        if (!candidateHost) return;
+        const cleaned = extractHostFromValue(candidateHost) || candidateHost;
+        if (cleaned && cleaned !== adminHost) {
+            adminHost = cleaned;
+            adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+        }
+    }
+
+    function resolveApi(path) {
+        if (!path.startsWith("/")) path = `/${path}`;
+        return `${adminApiBase}${path}`;
+    }
+
     async function loadInfo() {
         const debug = document.getElementById("debugInfo");
         const pill = document.getElementById("refreshPill");
@@ -213,9 +242,9 @@
         try {
             // Use loopback for metadata fetch in the form to avoid external loopback issues
             const [provRes, cfgRes, metaRes] = await Promise.all([
-                fetch("http://localhost:9999/api/provider-info"),
-                fetch("http://localhost:9999/api/sentinel-config"),
-                fetch("http://localhost:9999/api/sentinel-metadata?loopback=1"),
+                fetch(resolveApi("/api/provider-info")),
+                fetch(resolveApi("/api/sentinel-config")),
+                fetch(resolveApi("/api/sentinel-metadata?loopback=1")),
             ]);
             const prov = await provRes.json();
             const cfg = await cfgRes.json();
@@ -228,7 +257,7 @@
                 document.getElementById("walletKey").textContent = prov.user || "(not set)";
                 document.getElementById("bech32Pubkey").textContent =
                     (prov.pubkey && prov.pubkey.bech32) || prov.pubkey_error || "(not set)";
-                document.getElementById("metadataNonce").textContent = prov.metadata_nonce || "(not set)";
+                if (prov.sentinel_uri) setAdminHost(prov.sentinel_uri);
             }
 
             const yamlEl = document.getElementById("sentinelYaml");
@@ -271,6 +300,26 @@
         el.style.display = show ? "flex" : "none";
     }
 
+    async function exportSentinelBundle() {
+        const resEl = document.getElementById("exportResult");
+        if (resEl) {
+            resEl.style.display = "block";
+            resEl.textContent = "Exporting sentinel config...";
+        }
+        try {
+            const res = await fetch(resolveApi("/api/provider-export"), { method: "POST" });
+            const data = await res.json();
+            if (res.ok) {
+                const pretty = JSON.stringify(data.export, null, 2);
+                resEl.textContent = `Exported to ${data.path || "(unknown)"}${data.bytes ? ` (${data.bytes} bytes)` : ""}\n\n${pretty}`;
+            } else {
+                resEl.textContent = `Export failed: ${JSON.stringify(data, null, 2)}`;
+            }
+        } catch (e) {
+            if (resEl) resEl.textContent = "Export request failed: " + e;
+        }
+    }
+
     async function saveConfig() {
         const btn = document.getElementById("saveSentinelBtn");
         if (btn) { btn.disabled = true; btn.textContent = "Saving..."; }
@@ -288,7 +337,7 @@
         resEl.style.display = "block";
         resEl.textContent = "Saving...";
         try {
-            const res = await fetch("http://localhost:9999/api/sentinel-config", {
+            const res = await fetch(resolveApi("/api/sentinel-config"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),

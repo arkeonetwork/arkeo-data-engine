@@ -229,7 +229,43 @@
 <pre id="servicesDebug" class="pre-wrap"></pre>
 
 <script>
+    const DEFAULT_ADMIN_API_PORT = "9999";
+    let adminHost = (window.location && window.location.hostname) || "localhost";
+    let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+
+    function buildBaseUrl(host, port) {
+        const proto = (window.location && window.location.protocol === "https:") ? "https:" : "http:";
+        const cleaned = (host || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
+        return `${proto}//${cleaned}${port ? `:${port}` : ""}`;
+    }
+
+    function extractHostFromValue(val) {
+        if (!val) return "";
+        try {
+            const u = val.startsWith("http") ? new URL(val) : new URL(`http://${val}`);
+            return u.hostname || "";
+        } catch (e) {
+            return "";
+        }
+    }
+
+    function setAdminHost(candidateHost) {
+        if (!candidateHost) return;
+        const cleaned = extractHostFromValue(candidateHost) || candidateHost;
+        if (cleaned && cleaned !== adminHost) {
+            adminHost = cleaned;
+            adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+        }
+    }
+
+    function resolveApi(path) {
+        if (!path.startsWith("/")) path = `/${path}`;
+        return `${adminApiBase}${path}`;
+    }
+
     let pendingEditService = null;
+    let cachedProviderForm = null;
+    let cachedServiceChoice = null;
     let servicesLoaded = false;
     let servicesCatalog = [];
     let editingExisting = false;
@@ -270,7 +306,7 @@
         const select = document.getElementById("bondService");
         select.innerHTML = '<option value="">Loading services...</option>';
         try {
-            const res = await fetch("http://localhost:9999/api/services");
+            const res = await fetch(resolveApi("/api/services"));
             const data = await res.json();
             setPre("servicesDebug", "");
             if (!res.ok) {
@@ -290,17 +326,21 @@
             for (const svc of services) {
                 const id = svc.id ?? "";
                 const name = svc.name ?? "";
+                const desc = svc.description ?? "";
                 if (!id && !name) continue;
                 const opt = document.createElement("option");
                 // Use the service name as the value; fall back to id only if name missing
                 opt.value = name || id;
                 opt.dataset.id = id;
-                opt.textContent = name ? `${name} (${id})` : id;
+                const label = name ? `${name} (${id})` : id;
+                const extra = desc ? `${desc} (${name || id} : ${id})` : label;
+                opt.textContent = desc ? extra : label;
                 select.appendChild(opt);
             }
             setPre("servicesDebug", "");
             servicesLoaded = true;
             applyPendingEdit();
+            applyCachedProviderForm();
         } catch (e) {
             select.innerHTML = '<option value="">Failed to load services</option>';
             setPre("bondResult", "Request failed: " + e);
@@ -319,6 +359,7 @@
         const select = document.getElementById("bondService");
         const selectedOption = select.options[select.selectedIndex];
         const serviceId = selectedOption ? selectedOption.dataset.id || "" : "";
+        const serviceName = document.getElementById("bondService").value.trim();
         const payload = {
             service: document.getElementById("bondService").value.trim(),
             bond: bondAmount,
@@ -337,7 +378,7 @@
         setPre("bondResult", "Submitting bond and mod...");
         showSavingOverlay(true);
         try {
-            const res = await fetch("http://localhost:9999/api/bond-mod-provider", {
+            const res = await fetch(resolveApi("/api/bond-mod-provider"), {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -345,34 +386,43 @@
                 body: JSON.stringify(payload),
             });
             const data = await res.json();
-            if (!res.ok) {
+            const resOk = res.ok;
+            updateDerivedFields(data);
+            try {
+                const rebuildRes = await fetch(resolveApi("/api/sentinel-rebuild"), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        service_overrides: [
+                            {
+                                name: payload.service,
+                                id: serviceId,
+                                service: serviceName,
+                                status: payload.status,
+                                rpc_url: payload.rpc_url,
+                                rpc_user: payload.rpc_user,
+                                rpc_pass: payload.rpc_pass,
+                            },
+                        ],
+                    }),
+                });
+                const rebuildData = await rebuildRes.json();
+                if (!rebuildRes.ok) {
+                    setPre("bondResult", "Sentinel rebuild failed: " + JSON.stringify(rebuildData, null, 2));
+                    return;
+                }
+                setPre("bondResult", "Sentinel rebuild ok:\n" + JSON.stringify(rebuildData, null, 2));
+            } catch (e) {
+                console.warn("sentinel rebuild failed", e);
+                setPre("bondResult", "Sentinel rebuild failed: " + e);
+                return;
+            }
+            if (!resOk) {
                 setPre("bondResult", "Error: " + JSON.stringify(data, null, 2));
-                updateDerivedFields(data);
                 return;
             }
             setPre("bondResult", JSON.stringify(data, null, 2));
-            updateDerivedFields(data);
-            if (bondAndModSucceeded(data)) {
-                try {
-                    await fetch("http://localhost:9999/api/sentinel-rebuild", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            service_overrides: [
-                                {
-                                    name: payload.service,
-                                    id: serviceId,
-                                    status: payload.status,
-                                    rpc_url: payload.rpc_url,
-                                    rpc_user: payload.rpc_user,
-                                    rpc_pass: payload.rpc_pass,
-                                },
-                            ],
-                        }),
-                    });
-                } catch (e) {
-                    console.warn("sentinel rebuild failed", e);
-                }
+            if (resOk && bondAndModSucceeded(data)) {
                 window.location.href = "index.html";
             }
         } catch (e) {
@@ -430,15 +480,20 @@
             if (data.inputs.settlement_dur) document.getElementById("settlementDur").value = data.inputs.settlement_dur;
         }
         applyPendingEdit();
+        applyCachedProviderForm();
     }
 
     async function loadProviderInfo() {
         try {
-            const res = await fetch("http://localhost:9999/api/provider-info");
+            const res = await fetch(resolveApi("/api/provider-info"));
             const data = await res.json();
             if (!res.ok) {
                 setPre("bondResult", "Error loading provider info: " + JSON.stringify(data, null, 2));
                 return;
+            }
+            cachedProviderForm = (data.provider_export && data.provider_export.provider_form) || null;
+            if (cachedProviderForm && cachedProviderForm.service) {
+                cachedServiceChoice = cachedProviderForm.service;
             }
             updateDerivedFields(data);
             if (data.fees) document.getElementById("bondFeesLabel").textContent = data.fees;
@@ -451,8 +506,10 @@
             }
             if (data.sentinel_uri) {
                 document.getElementById("sentinelUri").value = data.sentinel_uri;
+                setAdminHost(data.sentinel_uri);
             }
             applyPendingEdit();
+            applyCachedProviderForm();
         } catch (e) {
             setPre("bondResult", "Request failed: " + e);
         }
@@ -460,7 +517,7 @@
 
     async function loadSentinelConfig() {
         try {
-            const res = await fetch("http://localhost:9999/api/sentinel-config");
+            const res = await fetch(resolveApi("/api/sentinel-config"));
             const data = await res.json();
             if (res.ok && data && data.config && Array.isArray(data.config.services)) {
                 sentinelServices = data.config.services;
@@ -489,7 +546,18 @@
             if (!cand) continue;
             const val = String(cand);
             for (const opt of select.options) {
-                if (opt.value === val || opt.text === val || opt.text.includes(`(${val})`)) {
+                const txt = opt.text || "";
+                const normalizedText = txt.toLowerCase();
+                const normalizedVal = val.toLowerCase();
+                const dataId = (opt.dataset && opt.dataset.id) ? opt.dataset.id.toLowerCase() : "";
+                if (
+                    opt.value.toLowerCase() === normalizedVal ||
+                    dataId === normalizedVal ||
+                    normalizedText === normalizedVal ||
+                    normalizedText.includes(`(${normalizedVal} :`) ||
+                    normalizedText.includes(`(${normalizedVal}:`) ||
+                    normalizedText.includes(`(${normalizedVal})`)
+                ) {
                     select.value = opt.value;
                     return true;
                 }
@@ -561,6 +629,34 @@
         }
         setBondLabelForMode();
         pendingEditService = null;
+    }
+
+    function applyCachedProviderForm() {
+        if (!cachedProviderForm || editingExisting) return;
+        const cf = cachedProviderForm;
+        const setVal = (id, val) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            if (el.value === "" || el.value === el.placeholder) {
+                el.value = val;
+            }
+        };
+        if (cf.sentinel_uri) setVal("sentinelUri", cf.sentinel_uri);
+        if (cf.status) setVal("status", cf.status);
+        if (cf.min_contract_dur) setVal("minContractDur", cf.min_contract_dur);
+        if (cf.max_contract_dur) setVal("maxContractDur", cf.max_contract_dur);
+        if (cf.subscription_rates) setVal("subscriptionRates", cf.subscription_rates);
+        if (cf.pay_as_you_go_rates) setVal("payAsYouGoRates", cf.pay_as_you_go_rates);
+        if (cf.settlement_dur) setVal("settlementDur", cf.settlement_dur);
+        if (cf.rpc_url) setVal("rpcUrl", cf.rpc_url);
+        if (cf.rpc_user) setVal("rpcUser", cf.rpc_user);
+        if (cf.rpc_pass) setVal("rpcPass", cf.rpc_pass);
+        if (cf.service && servicesLoaded) {
+            const select = document.getElementById("bondService");
+            setSelectFromCandidates(select, [cf.service]);
+        } else if (cf.service) {
+            cachedServiceChoice = cf.service;
+        }
     }
 
     function txSucceeded(tx) {
