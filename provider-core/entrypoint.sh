@@ -13,10 +13,10 @@ strip_quotes() {
 echo "Provider-core Admin Mode (hot wallet + web UI only)"
 
 KEY_NAME=${KEY_NAME:-provider}
-KEY_MNEMONIC=${KEY_MNEMONIC:-}
+RAW_KEY_MNEMONIC=${KEY_MNEMONIC:-}
 KEY_KEYRING_BACKEND=${KEY_KEYRING_BACKEND:-test}
 
-ARKEOD_HOME=${ARKEOD_HOME:-/root/.arkeod}
+ARKEOD_HOME=${ARKEOD_HOME:-~/.arkeod}
 # Expand leading tilde if provided via env (e.g. "~/.arkeod")
 ARKEOD_HOME=${ARKEOD_HOME/#\~/$HOME}
 ARKEOD_NODE=${ARKEOD_NODE:-${EXTERNAL_ARKEOD_NODE:-tcp://provider1.innovationtheory.com:26657}}
@@ -57,7 +57,7 @@ if arkeod --home "$ARKEOD_HOME" \
   echo "Key '$KEY_NAME' already exists in keyring '$KEY_KEYRING_BACKEND'."
 
 # Restore from mnemonic
-elif [ -n "$KEY_MNEMONIC" ]; then
+elif KEY_MNEMONIC=$(printf "%s" "$RAW_KEY_MNEMONIC" | sed 's/^ *//;s/ *$//' ); [ -n "$KEY_MNEMONIC" ]; then
 
   echo "Key '$KEY_NAME' not found – importing from KEY_MNEMONIC..."
   printf "%s\n" "$KEY_MNEMONIC" \
@@ -185,7 +185,7 @@ EOF
   echo "Wrote default sentinel config to $SENTINEL_CONFIG_PATH"
 else
   # If config exists, ensure pubkey defaults to the hotwallet and name has a sane default
-  python3 - <<PY
+  python3 - <<'PY'
 import yaml
 path = "${SENTINEL_CONFIG_PATH}"
 pub = "${BECH32_PUBKEY}".strip()
@@ -216,7 +216,7 @@ PY
 fi
 
 # Sync services in sentinel.yaml with on-chain registered services for this provider
-python3 - <<PY
+python3 - <<'PY'
 import json, yaml, subprocess, sys
 from copy import deepcopy
 
@@ -373,8 +373,8 @@ PROVIDER_PUBKEY="${CLEAN_PROVIDER_PUBKEY}"
 EOF
   echo "Wrote default sentinel env to $SENTINEL_ENV_PATH"
 else
-  # Patch existing env file with defaults where missing/empty
-  python3 - <<PY
+# Patch existing env file with defaults where missing/empty
+  python3 - <<'PY'
 import shlex
 from pathlib import Path
 path = Path("${SENTINEL_ENV_PATH}")
@@ -382,11 +382,21 @@ if not path.is_file():
     raise SystemExit
 lines = path.read_text(encoding="utf-8").splitlines()
 data = {}
+def dequote(val: str) -> str:
+    val = (val or "").strip()
+    # strip matching leading/trailing quotes repeatedly
+    while len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+        val = val[1:-1].strip()
+    return val
+def requote(val: str) -> str:
+    val = dequote(val)
+    safe = val.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{safe}"'
 for line in lines:
     if not line or line.strip().startswith("#") or "=" not in line:
         continue
     k, v = line.split("=", 1)
-    data[k.strip()] = v.strip()
+    data[k.strip()] = dequote(v)
 defaults = {
     "PROVIDER_NAME": "${CLEAN_PROVIDER_NAME}",
     "MONIKER": "${CLEAN_MONIKER}",
@@ -423,7 +433,7 @@ if not changed:
     raise SystemExit
 with path.open("w", encoding="utf-8") as f:
     for k, v in data.items():
-        f.write(f"{k}={shlex.quote(v)}\\n")
+        f.write(f"{k}={requote(v)}\\n")
 PY
 fi
 

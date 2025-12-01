@@ -736,6 +736,10 @@
         const resolvedHost = extractHostFromValue(sentinelNode) || adminHost;
         setAdminHost(resolvedHost);
         const sentinelFull = sentinelNode ? `${sentinelNode}:${sentinelPort}` : `(not set):${sentinelPort}`;
+        // Always use loopback for the internal check
+        const sentinelInternalUrl = buildBaseUrl("127.0.0.1", sentinelPort);
+        const sentinelExternalHost = extractHostFromValue(sentinelNode) || adminHost;
+        const sentinelExternalUrl = buildBaseUrl(sentinelExternalHost, sentinelPort);
         const adminApiPort = pickEnv("ADMIN_API_PORT") || pickMeta("ADMIN_API_PORT") || "9999";
         const adminPort = pickEnv("ADMIN_PORT") || pickMeta("ADMIN_PORT") || "8080";
         const adminApiUrl = buildBaseUrl(resolvedHost, adminApiPort);
@@ -753,9 +757,9 @@
             `<div class="endpoint-section-title"><h3>External Access</h3></div>`,
             makeRow("Arkeo Node", arkeodNode, "arkeod-status"),
             makeRow("Arkeo RPC", restApi, "arkeorpc-status"),
-            `<div class="endpoint-row"><strong>Sentinel RPC (External): </strong><br><span class="muted endpoint-url">${sentinelFull}</span></div>`,
+            makeRow("Sentinel RPC (External)", sentinelExternalUrl, "sentinel-external-status"),
             `<div class="endpoint-section-title"><h3>Internal Access</h3></div>`,
-            makeRow("Sentinel RPC (Internal)", `http://localhost:${sentinelPort}`, "internal-sentinel-status"),
+            makeRow("Sentinel RPC (Internal)", sentinelInternalUrl, "internal-sentinel-status"),
             makeRow("Admin API", `${adminApiUrl}/api/version`, "internal-adminapi-status"),
             makeRow("Admin UI", `${adminUiUrl}`, "internal-admin-status")
         ].join("");
@@ -763,7 +767,8 @@
         // Kick off reachability checks
         checkEndpoint("arkeod-status", arkeodNode, { pathOverride: "/health", allowOpaqueOk: true });
         checkEndpoint("arkeorpc-status", restApi, { pathOverride: "/cosmos/base/tendermint/v1beta1/node_info", allowOpaqueOk: true });
-        checkEndpoint("internal-sentinel-status", `http://localhost:${sentinelPort}`, { pathOverride: "/metadata.json", allowOpaqueOk: true });
+        checkEndpoint("sentinel-external-status", sentinelExternalUrl, { pathOverride: "/metadata.json", allowOpaqueOk: true });
+        checkEndpoint("internal-sentinel-status", sentinelInternalUrl, { pathOverride: "/metadata.json", allowOpaqueOk: true });
         checkEndpoint("internal-adminapi-status", `${adminApiUrl}/api/version`, { allowOpaqueOk: true });
         checkEndpoint("internal-admin-status", `${adminUiUrl}`, { allowOpaqueOk: true });
     }
