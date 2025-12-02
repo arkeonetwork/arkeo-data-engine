@@ -52,7 +52,7 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Expose the admin UI (8080) and admin API (9999).
-EXPOSE 8080 9999
+# Expose the admin UI (8079) and admin API (9998).
+EXPOSE 8079 9998
 
 ENTRYPOINT ["/app/entrypoint.sh"]

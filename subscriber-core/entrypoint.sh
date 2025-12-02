@@ -16,8 +16,8 @@ KEY_NAME=${KEY_NAME:-subscriber}
 KEY_MNEMONIC=${KEY_MNEMONIC:-}
 KEY_KEYRING_BACKEND=${KEY_KEYRING_BACKEND:-test}
 
-ARKEOD_HOME=${ARKEOD_HOME:-/root/.arkeod}
-# Expand leading tilde if provided via env (e.g. "~/.arkeod")
+ARKEOD_HOME=${ARKEOD_HOME:-/root/.arkeo}
+# Expand leading tilde if provided via env (e.g. "~/.arkeo")
 ARKEOD_HOME=${ARKEOD_HOME/#\~/$HOME}
 ARKEOD_NODE=${ARKEOD_NODE:-${EXTERNAL_ARKEOD_NODE:-tcp://provider1.innovationtheory.com:26657}}
 RPC_URL_DEFAULT=${SENTINEL_RPC_URL:-$ARKEOD_NODE}
@@ -52,6 +52,11 @@ echo "  CACHE_WARM_ON_START   = $CACHE_WARM_ON_START"
 
 # Ensure home directory exists
 mkdir -p "$ARKEOD_HOME"
+# signhere expects ~/.arkeo; if ARKEOD_HOME differs, ensure ~/.arkeo points there
+if [ "$ARKEOD_HOME" != "$HOME/.arkeo" ]; then
+  ln -sfn "$ARKEOD_HOME" "$HOME/.arkeo"
+fi
+
 mkdir -p /app/config
 mkdir -p "$CACHE_DIR"
 # Ensure supervisor runtime dirs exist (for supervisorctl socket/logs)

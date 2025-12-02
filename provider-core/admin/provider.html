@@ -112,6 +112,24 @@
             </tr>
             <tr>
                 <td class="label">
+                    Bond Amount
+                    <div class="hint">On a new provider, 100000000uarkeo is required. On an edit, a minimum of 1uarkeo is required.</div>
+                </td>
+                <td class="value">
+                    <input type="text" id="bondAmountInput" value="1" />
+                </td>
+            </tr>
+            <tr>
+                <td class="label">
+                    Current Bond Amount
+                    <div class="hint">The minimum total bond amount is 100000000uarkeo.</div>
+                </td>
+                <td class="value">
+                    <span id="currentBondAmountLabel">–</span>
+                </td>
+            </tr>
+            <tr>
+                <td class="label">
                     Sentinel URI
                     <div class="hint">The URI and port for the sentinel service for your provider.</div>
                 </td>
@@ -171,15 +189,6 @@
                 </td>
                 <td class="value">
                     <span id="bech32PubkeyLabel">(pending)</span>
-                </td>
-            </tr>
-            <tr>
-                <td class="label">
-                    Bond Amount
-                    <div class="hint">The default amount of 1uarkeo to bond your provider with.</div>
-                </td>
-                <td class="value">
-                    <span id="bondAmountLabel">1uarkeo</span>
                 </td>
             </tr>
             <tr>
@@ -273,10 +282,27 @@
     let nonceLockedFromEdit = false;
     let sentinelServices = [];
 
-    function setBondLabelForMode() {
-        const label = document.getElementById("bondAmountLabel");
-        if (!label) return;
-        label.textContent = "1uarkeo";
+    function setBondAmountForMode() {
+        const input = document.getElementById("bondAmountInput");
+        if (!input) return;
+        // Default to 1; respect any user-entered value.
+        if (!input.value) input.value = "1";
+    }
+
+    function formatBondDisplay(val) {
+        if (!val) return "–";
+        const trimmed = String(val).trim();
+        if (!trimmed) return "–";
+        // If it already ends with uarkeo (case-insensitive), keep it; otherwise append for display.
+        if (trimmed.toLowerCase().endsWith("uarkeo")) return trimmed;
+        return `${trimmed}uarkeo`;
+    }
+
+    function parseBondAmountUnits(val) {
+        if (!val) return NaN;
+        const m = String(val).trim().match(/^(\d+)/);
+        if (!m) return NaN;
+        return Number(m[1]);
     }
 
     function showSavingOverlay(show) {
@@ -299,7 +325,7 @@
             console.warn("Failed to read cached service edit", e);
             editingExisting = false;
         }
-        setBondLabelForMode();
+        setBondAmountForMode();
     }
 
     async function loadServices() {
@@ -353,7 +379,21 @@
         const submitBtn = document.getElementById("bondSubmit");
         submitBtn.disabled = true;
         submitBtn.textContent = "Submitting...";
-        const bondAmount = "1";
+        const bondAmountInput = document.getElementById("bondAmountInput");
+        const bondAmount = (bondAmountInput?.value || "").trim() || "1";
+        if (!/^[0-9]+$/.test(bondAmount)) {
+            alert("Bond amount must be an integer (no letters or symbols).");
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Submit Bond + Mod";
+            return;
+        }
+        const bondUnits = parseBondAmountUnits(bondAmount);
+        if (!editingExisting && (!Number.isFinite(bondUnits) || bondUnits < 100000000)) {
+            alert("Bond amount must be at least 100000000 for a new provider.");
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Submit Bond + Mod";
+            return;
+        }
         // Always increment the metadata nonce immediately before submitting
         const metadataNonce = incrementMetadataNonce();
         const select = document.getElementById("bondService");
@@ -453,7 +493,11 @@
         } else if (data.pubkey_error) {
             pubkeyLabel.textContent = data.pubkey_error;
         }
-        setBondLabelForMode();
+        if (data.bond && !editingExisting) {
+            const currentBond = document.getElementById("currentBondAmountLabel");
+            if (currentBond) currentBond.textContent = formatBondDisplay(data.bond);
+        }
+        setBondAmountForMode();
         if (data.fees) {
             document.getElementById("bondFeesLabel").textContent = data.fees;
         }
@@ -604,6 +648,10 @@
         if (svc.subscription_rates) document.getElementById("subscriptionRates").value = svc.subscription_rates;
         if (svc.pay_as_you_go_rates) document.getElementById("payAsYouGoRates").value = svc.pay_as_you_go_rates;
         if (svc.settlement_dur) document.getElementById("settlementDur").value = svc.settlement_dur;
+        if (svc.bond !== undefined) {
+            const currentBond = document.getElementById("currentBondAmountLabel");
+            if (currentBond) currentBond.textContent = formatBondDisplay(svc.bond);
+        }
         if (svc.metadata_uri) document.getElementById("sentinelUri").value = svc.metadata_uri;
         if (svc.metadata_nonce) {
             document.getElementById("metadataNonceHidden").value = svc.metadata_nonce;
@@ -621,13 +669,13 @@
                 if (resolvedName && resolvedName === sname) return true;
                 return false;
             });
-            if (match) {
-                if (match.rpc_url) document.getElementById("rpcUrl").value = match.rpc_url;
-                if (match.rpc_user !== undefined) document.getElementById("rpcUser").value = match.rpc_user;
-                if (match.rpc_pass !== undefined) document.getElementById("rpcPass").value = match.rpc_pass;
-            }
+                if (match) {
+                    if (match.rpc_url) document.getElementById("rpcUrl").value = match.rpc_url;
+                    if (match.rpc_user !== undefined) document.getElementById("rpcUser").value = match.rpc_user;
+                    if (match.rpc_pass !== undefined) document.getElementById("rpcPass").value = match.rpc_pass;
+                }
         }
-        setBondLabelForMode();
+        setBondAmountForMode();
         pendingEditService = null;
     }
 

@@ -27,7 +27,7 @@ def _build_sentinel_uri() -> str:
     host = os.getenv("SENTINEL_BIND_HOST") or "127.0.0.1"
     return f"http://{host}:{port}/metadata.json"
 
-ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeod"))
+ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeo"))
 KEY_NAME = os.getenv("KEY_NAME", "provider")
 KEYRING = os.getenv("KEY_KEYRING_BACKEND", "test")
 def _strip_quotes(val: str | None) -> str:
@@ -928,6 +928,7 @@ def provider_services():
                 # Normalized id/name: if id missing, fall back to service field
                 sid = s.get("service_id") or s.get("id") or s.get("service")
                 sname = s.get("service") or s.get("name")
+                bond_val = s.get("bond") or p.get("bond")
                 services.append(
                     {
                         "name": sname,
@@ -941,6 +942,7 @@ def provider_services():
                         "subscription_rates": sub_rate,
                         "pay_as_you_go_rates": paygo_rate,
                         "settlement_dur": settle,
+                        "bond": bond_val,
                     }
                 )
         else:
@@ -954,6 +956,7 @@ def provider_services():
             status_val = p.get("status")
             sid = p.get("service_id") or p.get("id") or p.get("service")
             sname = p.get("service") or p.get("name")
+            bond_val = p.get("bond")
             services.append(
                 {
                     "name": sname,
@@ -967,6 +970,7 @@ def provider_services():
                     "subscription_rates": sub_rate,
                     "pay_as_you_go_rates": paygo_rate,
                     "settlement_dur": settle,
+                    "bond": bond_val,
                 }
             )
 

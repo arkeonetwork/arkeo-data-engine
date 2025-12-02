@@ -34,7 +34,7 @@ Copy `provider.env` and set at least:
 `KEY_MNEMONIC=(Use your own Arkeo hot wallet mnemonic)`
 `CHAIN_ID=arkeo-main-v1`
 
-`ARKEOD_HOME=~/.arkeod`
+`ARKEOD_HOME=~/.arkeo`
 `EXTERNAL_ARKEOD_NODE=tcp://provider1.innovationtheory.com:26657`
 `ARKEO_REST_API_PORT=http://provider1.innovationtheory.com:1317`
 

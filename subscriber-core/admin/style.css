@@ -113,6 +113,7 @@ a { color: var(--blue-accent); }
 }
 
 .muted { color: var(--muted); }
+.muted.small { color: var(--muted-2); padding-left: 0; font-weight: 400; font-size: 12px; }
 .stack { display: flex; flex-direction: column; gap: 8px; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .pill-row { display: flex; gap: 12px; align-items: center; }
@@ -131,11 +132,7 @@ a { color: var(--blue-accent); }
     border-radius: 8px;
     padding: 10px 12px;
 }
-.metric-label {
-    color: var(--muted-2);
-    font-size: 12px;
-    letter-spacing: 0.02em;
-}
+.metric-label { color: var(--muted-2); font-weight: 400; font-size: 12px; }
 .metric-value {
     font-size: 22px;
     font-weight: 800;
@@ -168,7 +165,7 @@ a { color: var(--blue-accent); }
     border-radius: 6px;
     padding: 9px 12px;
     cursor: pointer;
-    font-weight: 600;
+    font-weight: 400;
     text-decoration: none;
     transition: transform 0.1s ease, box-shadow 0.1s ease;
 }
@@ -218,7 +215,7 @@ table {
 }
 td.label {
     width: 220px;
-    font-weight: 600;
+    font-weight: 400;
     color: #cbd5e1;
     padding: 10px 12px;
     border-bottom: 1px solid #1f2937;
@@ -376,7 +373,7 @@ pre {
 }
 .service-pipe {
     color: #475569;
-    font-weight: 600;
+    font-weight: 400;
 }
 .service-actions {
     display: flex;
@@ -406,12 +403,13 @@ pre {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 10px;
-    align-items: end;
+    align-items: center;
 }
 .listener-actions {
     display: flex;
     justify-content: flex-end;
     align-items: center;
+    margin-bottom: 14px;
 }
 .listener-form input[type="text"],
 .listener-form input[type="number"],
@@ -441,7 +439,7 @@ pre {
     border-bottom: 1px solid var(--border);
 }
 .col-status { width: 40px; white-space: nowrap; text-align: center; }
-.col-actions { width: 1%; white-space: nowrap; text-align: right; }
+.col-actions { width: 1%; white-space: nowrap; text-align: right; color: var(--muted-2);}
 .status-dot {
     display: inline-block;
     width: 10px;
@@ -455,7 +453,7 @@ pre {
 .dot-err { background: var(--err); }
 .table th {
     color: var(--muted-2);
-    font-weight: 600;
+    font-weight: 400;
     font-size: 12px;
     letter-spacing: 0.02em;
 }
@@ -469,6 +467,13 @@ pre {
     background: #0b1220;
     border: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
+}
+.listener-main select {
+    min-width: 140px;
+}
+.listener-sub input#listenerWhitelist,
+.listener-sub input[id^="editWhitelist-"] {
+    min-width: 300px;
 }
 .listener-sub td {
     background: #0b1220;
@@ -586,3 +591,5 @@ pre {
     background: linear-gradient(135deg, var(--err), #b91c1c);
     border: 1px solid #b91c1c;
 }
+
+.actions.align-right { justify-content: flex-end; }

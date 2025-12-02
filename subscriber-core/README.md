@@ -11,11 +11,11 @@ Containerized hot-wallet admin UI + API for Arkeo subscribers. Run locally or on
 cd subscriber-core
 docker build -t arkeonetwork/subscriber-core:dev .
 docker run --rm --env-file subscriber.env \
-  -p 8080:8080 -p 9999:9999 -p 3636:3636 \
+  -p 8079:8079 -p 9998:9998 -p 3636:3636 \
   arkeonetwork/subscriber-core:dev
 ```
-- Admin UI: http://localhost:8080/index.html
-- Admin API: http://localhost:9999
+- Admin UI: http://localhost:8079/index.html
+- Admin API: http://localhost:9998
 - Sentinel metadata: http://localhost:3636/metadata.json (if enabled)
 
 ## Environment
@@ -34,15 +34,15 @@ Copy `subscriber.env` and set at least:
 `KEY_MNEMONIC=(Use your own Arkeo hot wallet mnemonic)`
 `CHAIN_ID=arkeo-main-v1`
 
-`ARKEOD_HOME=~/.arkeod`
+`ARKEOD_HOME=~/.arkeo`
 `EXTERNAL_ARKEOD_NODE=tcp://provider1.innovationtheory.com:26657`
 `ARKEO_REST_API_PORT=http://provider1.innovationtheory.com:1317`
 
 `SENTINEL_NODE=`
 `SENTINEL_PORT=`
 
-ADMIN_PORT=8080
-ADMIN_API_PORT=9999
+ADMIN_PORT=8079
+ADMIN_API_PORT=9998
 ```
 
 The UI also persists sentinel values in `config/sentinel.env` and `config/sentinel.yaml`.
@@ -51,7 +51,7 @@ The UI also persists sentinel values in `config/sentinel.env` and `config/sentin
 ```bash
 docker pull ghcr.io/arkeonetwork/subscriber-core:latest
 docker run --rm --env-file subscriber.env \
-  -p 8080:8080 -p 9999:9999 -p 3636:3636 \
+  -p 8079:8079 -p 9998:9998 -p 3636:3636 \
   ghcr.io/arkeonetwork/subscriber-core:latest
 ```
 
@@ -61,7 +61,7 @@ docker run --rm --env-file subscriber.env \
 3) Configure subscriber settings as needed in the UI forms (defaults come from `subscriber.env`).
 
 ## Notes
-- Exposed ports: 8080 (web), 9999 (admin API), 3636 (sentinel). Adjust `-p` as needed.
+- Exposed ports: 8079 (web), 9998 (admin API), 3636 (sentinel). Adjust `-p` as needed.
 - Sentinel YAML lives at `/app/config/sentinel.yaml`; services are added/removed by the Provider Services form (inactive services are removed; a placeholder is only kept when no services remain).
 - Claims helper jobs (if present) can be triggered via the API; see scripts in this folder for examples.
 - A cache fetcher runs every 5 minutes (default) to download providers, contracts, and services from `arkeod` and stores them in `/app/cache/{provider-services,provider-contracts,service-types}.json`. Configure via `CACHE_DIR` or `CACHE_FETCH_INTERVAL` env vars. It also derives `/app/cache/active_providers.json` by fetching each provider’s external `metadata_uri` (short timeout; skipped for localhost/127.*), attaching metadata, and setting `status` (1 = fetched, 0 = missing/failed/timeout). After that it builds `/app/cache/active_services.json` for ONLINE services whose provider is active.

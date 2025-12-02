@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Tuple
 from urllib import request, error
 from urllib.parse import urlparse
 
-ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeod"))
+ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeo"))
 ARKEOD_NODE = (
     os.getenv("ARKEOD_NODE")
     or os.getenv("EXTERNAL_ARKEOD_NODE")

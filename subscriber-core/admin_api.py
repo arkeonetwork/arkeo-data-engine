@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import base64
+import binascii
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import socket
@@ -12,6 +15,9 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import yaml
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request
 
@@ -29,6 +35,7 @@ LISTENER_PORT_START = int(os.getenv("LISTENER_PORT_START", "62001"))
 LISTENER_PORT_END = int(os.getenv("LISTENER_PORT_END", "62100"))
 ACTIVE_SERVICE_TYPES_FILE = os.path.join(CACHE_DIR, "active_service_types.json")
 SUBSCRIBER_INFO_FILE = os.path.join(CACHE_DIR, "subscriber_info.json")
+LOG_DIR = os.path.join(CACHE_DIR, "logs")
 _LISTENER_SERVERS: dict[int, dict] = {}
 _LISTENER_LOCK = threading.Lock()
 
@@ -46,9 +53,10 @@ def _build_sentinel_uri() -> str:
     host = os.getenv("SENTINEL_BIND_HOST") or "127.0.0.1"
     return f"http://{host}:{port}/metadata.json"
 
-ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeod"))
+ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeo"))
 KEY_NAME = os.getenv("KEY_NAME", "subscriber")
 KEYRING = os.getenv("KEY_KEYRING_BACKEND", "test")
+KEY_MNEMONIC = os.getenv("KEY_MNEMONIC", "")
 def _strip_quotes(val: str | None) -> str:
     if not val:
         return ""
@@ -73,9 +81,33 @@ SENTINEL_URI_DEFAULT = os.getenv("SENTINEL_URI") or _build_sentinel_uri()
 METADATA_NONCE_DEFAULT = os.getenv("METADATA_NONCE") or "1"
 BOND_DEFAULT = os.getenv("BOND_AMOUNT") or "1"
 FEES_DEFAULT = os.getenv("TX_FEES") or "200uarkeo"
-API_PORT = int(os.getenv("ADMIN_API_PORT", "9999"))
+API_PORT = int(os.getenv("ADMIN_API_PORT", "9998"))
 SENTINEL_CONFIG_PATH = os.getenv("SENTINEL_CONFIG_PATH", "/app/config/sentinel.yaml")
 SENTINEL_ENV_PATH = os.getenv("SENTINEL_ENV_PATH", "/app/config/sentinel.env")
+
+# PAYG proxy defaults (can be overridden via env; per-listener overrides later)
+PROXY_AUTO_CREATE = True
+# Default to 0 so we compute deposit = duration * qpm * rate when unset.
+PROXY_CREATE_DEPOSIT = os.getenv("PROXY_CREATE_DEPOSIT", "0")
+PROXY_CREATE_DURATION = os.getenv("PROXY_CREATE_DURATION", "5000")
+PROXY_CREATE_RATE = os.getenv("PROXY_CREATE_RATE", FEES_DEFAULT)
+PROXY_CREATE_QPM = os.getenv("PROXY_CREATE_QPM", "10")
+PROXY_CREATE_SETTLEMENT = os.getenv("PROXY_CREATE_SETTLEMENT", "1000")
+PROXY_CREATE_AUTHZ = os.getenv("PROXY_CREATE_AUTHZ", "0")
+PROXY_CREATE_DELEGATE = os.getenv("PROXY_CREATE_DELEGATE", "")
+PROXY_CREATE_FEES = os.getenv("PROXY_CREATE_FEES", FEES_DEFAULT)
+PROXY_CREATE_TIMEOUT = int(os.getenv("PROXY_CREATE_TIMEOUT", "30"))
+PROXY_CREATE_BACKOFF = int(os.getenv("PROXY_CREATE_BACKOFF", "2"))
+PROXY_MAX_DEPOSIT = os.getenv("PROXY_MAX_DEPOSIT", "50000000")
+PROXY_SIGN_TEMPLATE = os.getenv("PROXY_SIGN_TEMPLATE", "{contract_id}:{nonce}:")
+PROXY_ARKAUTH_FORMAT = os.getenv("PROXY_ARKAUTH_FORMAT", "4part")
+PROXY_TIMEOUT_SECS = int(os.getenv("PROXY_TIMEOUT_SECS", "15"))
+PROXY_WHITELIST_IPS = os.getenv("PROXY_WHITELIST_IPS", "0.0.0.0")
+PROXY_TRUST_FORWARDED = str(os.getenv("PROXY_TRUST_FORWARDED", "true")).lower() in ("1", "true", "yes", "on")
+PROXY_DECORATE_RESPONSE = str(os.getenv("PROXY_DECORATE_RESPONSE", "true")).lower() in ("1", "true", "yes", "on")
+PROXY_ARKAUTH_AS_HEADER = str(os.getenv("PROXY_ARKAUTH_AS_HEADER", "false")).lower() in ("1", "true", "yes", "on")
+PROXY_CONTRACT_TIMEOUT = int(os.getenv("PROXY_CONTRACT_TIMEOUT", "10"))
+SIGNHERE_HOME = os.path.join(Path.home(), ".arkeo")
 
 
 def run(cmd: str) -> tuple[int, str]:
@@ -117,22 +149,45 @@ def derive_pubkeys(user: str, keyring_backend: str) -> tuple[str, str, str | Non
         "keys",
         "show",
         user,
-        "-p",
         "--keyring-backend",
         keyring_backend,
     ]
+    # Request JSON to get the pubkey field
+    pubkey_cmd.extend(["--output", "json"])
     code, pubkey_out = run_list(pubkey_cmd)
     if code != 0:
         return "", "", f"failed to fetch raw pubkey: {pubkey_out}"
 
     try:
-        raw_pubkey = json.loads(pubkey_out).get("key", "").strip()
+        pub_json = json.loads(pubkey_out)
+        raw_pubkey = pub_json.get("pubkey")
+        pk_type = ""
+        if isinstance(raw_pubkey, str):
+            raw_pubkey = raw_pubkey.strip()
+            # handle JSON-encoded pubkey string
+            if raw_pubkey.startswith("{") and raw_pubkey.endswith("}"):
+                try:
+                    inner = json.loads(raw_pubkey)
+                    pk_type = inner.get("@type") or pk_type
+                    raw_pubkey = inner.get("key", "") or ""
+                except Exception:
+                    pass
+        elif isinstance(raw_pubkey, dict):
+            pk_type = raw_pubkey.get("@type") or ""
+            raw_pubkey = raw_pubkey.get("key", "") or ""
+        else:
+            raw_pubkey = ""
     except json.JSONDecodeError:
         raw_pubkey = ""
     if not raw_pubkey:
         return "", "", f"could not parse raw pubkey: {pubkey_out}"
 
+    # Use secp256k1 unless explicitly signaled otherwise
     bech32_cmd = ["arkeod", "debug", "pubkey-raw", raw_pubkey]
+    pk_type_lower = (pk_type or "").lower()
+    if "secp256k1" in pk_type_lower or not pk_type_lower:
+        bech32_cmd.extend(["-t", "secp256k1"])
+
     code, bech32_out = run_list(bech32_cmd)
     if code != 0:
         return raw_pubkey, "", f"failed to convert pubkey: {bech32_out}"
@@ -725,6 +780,34 @@ def subscriber_info():
     return jsonify(resp)
 
 
+@app.get("/api/payg-status")
+def payg_status():
+    """Quick status endpoint for PAYG proxy: key, homes, and height."""
+    _ensure_signhere_home()
+    resp = provider_info().get_json()
+    addr, addr_err = derive_address(KEY_NAME, KEYRING)
+    height, h_err = _latest_block_height()
+    signhere_target = None
+    try:
+        signhere_target = str(Path(SIGNHERE_HOME).resolve())
+    except Exception:
+        pass
+    payload = {
+        "key_name": KEY_NAME,
+        "keyring_backend": KEYRING,
+        "address": addr,
+        "address_error": addr_err,
+        "pubkey": resp.get("pubkey") if isinstance(resp, dict) else {},
+        "pubkey_error": resp.get("pubkey_error") if isinstance(resp, dict) else None,
+        "arkeod_home": ARKEOD_HOME,
+        "signhere_home": SIGNHERE_HOME,
+        "signhere_points_to": signhere_target,
+        "latest_block": height,
+        "latest_block_error": h_err,
+    }
+    return jsonify(payload)
+
+
 @app.get("/api/services")
 def list_services():
     """Return available services from arkeod."""
@@ -1164,6 +1247,105 @@ def _write_listeners(data: dict) -> None:
             pass
 
 
+def _safe_int(val, default: int = 0) -> int:
+    try:
+        return int(str(val))
+    except Exception:
+        return default
+
+
+def _build_arkeo_meta(active_contract: dict | None, nonce: int | None) -> dict:
+    """Build a debug meta block similar to the standalone proxy script."""
+    meta: dict = {
+        "contract_id": "",
+        "service_id": None,
+        "provider": "",
+        "client": "",
+        "nonce_request": nonce,
+        "cost_request": "",
+        "deposit": None,
+        "qpm": None,
+        "duration": None,
+        "opened_height": None,
+    }
+    if not isinstance(active_contract, dict):
+        return meta
+    try:
+        rate = active_contract.get("rate") or {}
+        rate_amt = _safe_int(rate.get("amount"), 0)
+        rate_denom = rate.get("denom") or ""
+        meta.update(
+            {
+                "contract_id": str(active_contract.get("id", "")),
+                "service_id": _safe_int(active_contract.get("service")),
+                "provider": str(active_contract.get("provider", "")),
+                "client": str(active_contract.get("client", "")),
+                "nonce_request": nonce,
+                "cost_request": f"{rate_amt}{rate_denom}" if (rate_amt or rate_denom) else "",
+                "deposit": _safe_int(active_contract.get("deposit"), None),
+                "qpm": _safe_int(active_contract.get("queries_per_minute"), None),
+                "duration": _safe_int(active_contract.get("duration"), None),
+                "opened_height": _safe_int(active_contract.get("height"), None),
+            }
+        )
+    except Exception:
+        meta.update({"contract_id": str(active_contract.get("id", "")), "nonce_request": nonce})
+    return meta
+
+
+def _parse_rate_amount(rate_val) -> int:
+    """Extract integer amount from rate string or dict."""
+    if isinstance(rate_val, dict):
+        return _safe_int(rate_val.get("amount"), 0)
+    if isinstance(rate_val, str):
+        # Expect e.g. "200uarkeo"
+        digits = "".join(ch for ch in rate_val if ch.isdigit())
+        return _safe_int(digits, 0)
+    return _safe_int(rate_val, 0)
+
+
+def _listener_logger(port: int):
+    """Return a rotating file logger for a listener port."""
+    cache_ensure_cache_dir()
+    os.makedirs(LOG_DIR, exist_ok=True)
+    name = f"listener-{port}"
+    logger = logging.getLogger(name)
+    if getattr(logger, "_initialized", False):
+        return logger
+    logger.setLevel(logging.INFO)
+    log_path = os.path.join(LOG_DIR, f"listener-{port}.log")
+    handler = RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=3)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [port=%(port)s] %(message)s"))
+    handler.addFilter(lambda record: setattr(record, "port", port) or True)
+    logger.addHandler(handler)
+    logger.propagate = False
+    logger._initialized = True  # type: ignore
+    return logger
+
+
+def _parse_whitelist(csv: str | None) -> list[str]:
+    if not csv:
+        return []
+    return [ip.strip() for ip in csv.split(",") if ip.strip()]
+
+
+def _is_external(uri: str | None) -> bool:
+    if not uri:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(uri)
+        host = (parsed.hostname or "").lower()
+        if not parsed.scheme or not host:
+            return False
+        if host == "localhost":
+            return False
+        if host.startswith("127."):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _is_listener_active(entry: dict) -> bool:
     """Return True if listener status is active-like."""
     status = str(entry.get("status") or "").strip().lower()
@@ -1188,19 +1370,73 @@ class _HelloServer(socketserver.ThreadingTCPServer):
 
 
 def _start_listener_server(listener: dict) -> tuple[bool, str | None]:
-    """Start a background hello-world TCP listener for the given entry."""
+    """Start a background PAYG proxy for the given entry."""
     port_val = listener.get("port")
     try:
         port = int(port_val)
     except (TypeError, ValueError):
         return False, "invalid port"
+
+    provider_pubkey, sentinel_url, provider_moniker = _resolve_listener_target(listener)
+    if not sentinel_url:
+        sentinel_url = SENTINEL_URI_DEFAULT
+    if not sentinel_url:
+        return False, "no sentinel URL available for listener"
+
+    service_meta = _service_lookup(listener.get("service_id"))
+    service_name = service_meta.get("service_name") or listener.get("service_name") or listener.get("service_id")
+    service_desc = service_meta.get("service_description") or listener.get("service_description") or ""
+
+    cfg = {
+        "node_rpc": ARKEOD_NODE,
+        "chain_id": CHAIN_ID,
+        "client_key": KEY_NAME,
+        "keyring_backend": KEYRING,
+        "provider_pubkey": provider_pubkey,
+        "provider_moniker": provider_moniker,
+        "provider_sentinel_api": sentinel_url,
+        "service_name": service_name,
+        "service_description": service_desc,
+        "service_id": listener.get("service_id"),
+        "whitelist_ips": listener.get("whitelist_ips") or PROXY_WHITELIST_IPS,
+        "trust_forwarded": listener.get("trust_forwarded", PROXY_TRUST_FORWARDED),
+        "decorate_response": listener.get("decorate_response", PROXY_DECORATE_RESPONSE),
+        "arkauth_as_header": listener.get("arkauth_as_header", PROXY_ARKAUTH_AS_HEADER),
+        "auto_create": listener.get("auto_create", PROXY_AUTO_CREATE),
+        "create_provider_pubkey": provider_pubkey or listener.get("create_provider_pubkey"),
+        "create_service_name": service_name,
+        "create_type": listener.get("create_type", 1),
+        "create_deposit": listener.get("create_deposit", PROXY_CREATE_DEPOSIT),
+        "create_duration": listener.get("create_duration", PROXY_CREATE_DURATION),
+        "create_rate": listener.get("create_rate", PROXY_CREATE_RATE),
+        "create_qpm": listener.get("create_qpm", PROXY_CREATE_QPM),
+        "create_settlement": listener.get("create_settlement", PROXY_CREATE_SETTLEMENT),
+        "create_authz": listener.get("create_authz", PROXY_CREATE_AUTHZ),
+        "create_delegate": listener.get("create_delegate", PROXY_CREATE_DELEGATE),
+        "create_fees": listener.get("create_fees", PROXY_CREATE_FEES),
+        "max_deposit": listener.get("max_deposit", PROXY_MAX_DEPOSIT),
+        "create_timeout_sec": listener.get("create_timeout_sec", PROXY_CREATE_TIMEOUT),
+        "create_backoff_sec": listener.get("create_backoff_sec", PROXY_CREATE_BACKOFF),
+        "sign_template": listener.get("sign_template", PROXY_SIGN_TEMPLATE),
+        "arkauth_format": listener.get("arkauth_format", PROXY_ARKAUTH_FORMAT),
+        "timeout_secs": listener.get("timeout_secs", PROXY_TIMEOUT_SECS),
+    }
+
+    try:
+        srv = PaygProxyServer(("0.0.0.0", port), PaygProxyHandler)
+    except OSError as e:
+        return False, f"failed to bind port {port}: {e}"
+    srv.cfg = cfg
+    srv.logger = _listener_logger(port)
+    srv.client_pubkey = None
+    srv.active_contract = None
+    srv.last_code = None
+    srv.last_nonce = None
+
     with _LISTENER_LOCK:
         if port in _LISTENER_SERVERS:
+            srv.server_close()
             return True, None
-        try:
-            srv = _HelloServer(("0.0.0.0", port), _HelloHandler)
-        except OSError as e:
-            return False, f"failed to bind port {port}: {e}"
         thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
         _LISTENER_SERVERS[port] = {"server": srv, "thread": thread, "listener_id": listener.get("id")}
         thread.start()
@@ -1318,25 +1554,619 @@ def _bootstrap_listeners_from_cache():
             if not ok:
                 print(f"[listeners] failed to start listener on port {l.get('port')}: {err}")
     except Exception as e:
-            print(f"[listeners] bootstrap error: {e}")
+        print(f"[listeners] bootstrap error: {e}")
 
 
-def _test_listener_port(port: int, timeout: float = 3.0) -> tuple[bool, str | None, str | None]:
-    """Attempt to connect to localhost:port and read a small response."""
+# ─────────────────────────────────────
+# PAYG Proxy helpers
+# ─────────────────────────────────────
+def _service_lookup(service_id: str | int) -> dict:
+    """Return service name/description from active_service_types."""
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-            # Send a minimal payload; our listener will reply immediately anyway
+        with open(ACTIVE_SERVICE_TYPES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    items = data.get("active_service_types") if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        return {}
+    sid_str = str(service_id)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if sid_str == str(item.get("service_id") or item.get("id") or item.get("service")):
+            st = item.get("service_type") or {}
+            return {
+                "service_id": sid_str,
+                "service_name": st.get("name") or "",
+                "service_description": st.get("description") or "",
+            }
+    return {}
+
+
+def _sentinel_from_metadata_uri(uri: str | None) -> str | None:
+    if not uri:
+        return None
+    # strip trailing metadata.json and slashes
+    base = uri
+    if base.endswith("metadata.json"):
+        base = base[: -len("metadata.json")]
+    return base.rstrip("/")
+
+
+def _resolve_listener_target(listener: dict) -> tuple[str | None, str | None, str | None]:
+    """Return (provider_pubkey, sentinel_url, provider_moniker)."""
+    if not isinstance(listener, dict):
+        return None, None, None
+    # Prefer stored values if present
+    pk = listener.get("provider_pubkey")
+    sent = listener.get("sentinel_url")
+    mon = listener.get("provider_moniker")
+    if pk and sent:
+        return pk, sent, mon
+    top = listener.get("top_services") or []
+    if isinstance(top, list):
+        for ts in top:
+            if not isinstance(ts, dict):
+                continue
+            meta_uri = ts.get("metadata_uri")
+            if not _is_external(meta_uri):
+                continue
+            sentinel_url = _sentinel_from_metadata_uri(meta_uri)
+            if sentinel_url:
+                return ts.get("provider_pubkey") or pk, sentinel_url, ts.get("provider_moniker") or mon
+    return pk, sent, mon
+
+
+def _get_current_height(node: str) -> int:
+    cmd = ["arkeod", "--home", ARKEOD_HOME]
+    if node:
+        cmd.extend(["--node", node])
+    cmd.append("status")
+    code, out = run_list(cmd)
+    if code != 0:
+        return 0
+    try:
+        data = json.loads(out)
+        sync_info = data.get("sync_info") or data.get("SyncInfo") or {}
+        return _safe_int(sync_info.get("latest_block_height") or sync_info.get("latest_block"))
+    except Exception:
+        return 0
+
+
+def _fetch_contracts(node: str, timeout: int | None = None) -> list:
+    cmd = ["arkeod", "--home", ARKEOD_HOME]
+    if node:
+        cmd.extend(["--node", node])
+    cmd.extend(["query", "arkeo", "list-contracts", "-o", "json"])
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if completed.returncode != 0:
+            return []
+        out = completed.stdout
+    except subprocess.TimeoutExpired:
+        return []
+    except Exception:
+        return []
+    try:
+        data = json.loads(out)
+    except Exception:
+        return []
+    contracts = data.get("contract") or data.get("contracts")
+    return contracts if isinstance(contracts, list) else []
+
+
+def _select_active_contract(contracts: list, client_pub: str, svc_id: int, cur_height: int, provider_filter: str | None = None):
+    """Pick newest usable contract for this client/service (optionally provider)."""
+    def is_active(c):
+        if not isinstance(c, dict):
+            return False
+        if client_pub and str(c.get("client")) != client_pub:
+            return False
+        if _safe_int(c.get("service")) != svc_id:
+            return False
+        if provider_filter and str(c.get("provider")) != provider_filter:
+            return False
+        if _safe_int(c.get("settlement_height")) != 0:
+            return False
+        if _safe_int(c.get("deposit")) <= 0:
+            return False
+        if (_safe_int(c.get("height")) + _safe_int(c.get("duration"))) <= cur_height:
+            return False
+        return True
+
+    usable = [c for c in contracts if is_active(c)]
+    usable.sort(key=lambda x: _safe_int(x.get("id")), reverse=True)
+    return usable[0] if usable else None
+
+
+def _claims_highest_nonce(sentinel: str, contract_id: str, client_pub: str) -> int:
+    failed = 0
+    for key in ("client", "spender"):
+        url = f"{sentinel.rstrip('/')}/claims?contract_id={contract_id}&{key}={urllib.parse.quote(client_pub)}"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                data = json.loads(r.read().decode() or "{}")
+                n = data.get("highestNonce") or data.get("highest_nonce")
+                return _safe_int(n)
+        except Exception:
+            failed += 1
+    return 0 if failed else 0
+
+
+def _der_to_rs_hex(der: bytes) -> str:
+    if len(der) < 2 or der[0] != 0x30:
+        raise ValueError("not DER")
+    idx = 1
+    if der[idx] & 0x80:
+        nlen = der[idx] & 0x7F
+        idx += 1 + nlen
+    else:
+        idx += 1
+    if der[idx] != 0x02:
+        raise ValueError("no r")
+    lr = der[idx + 1]
+    r = der[idx + 2 : idx + 2 + lr]
+    idx += 2 + lr
+    if der[idx] != 0x02:
+        raise ValueError("no s")
+    ls = der[idx + 1]
+    s = der[idx + 2 : idx + 2 + ls]
+    r = r.lstrip(b"\x00")[:32]
+    s = s.lstrip(b"\x00")[:32]
+    r = (b"\x00" * (32 - len(r))) + r
+    s = (b"\x00" * (32 - len(s))) + s
+    return (r + s).hex()
+
+
+def _b64_or_hex_to_rs_hex(sig_text: str) -> str:
+    s = (sig_text or "").strip()
+    try:
+        b = bytes.fromhex(s)
+        if len(b) == 64:
+            return b.hex()
+        if len(b) and b[0] == 0x30:
+            return _der_to_rs_hex(b)
+        return b.hex()
+    except ValueError:
+        pass
+    sb64 = s.replace("-", "+").replace("_", "/")
+    sb64 += "=" * ((4 - len(sb64) % 4) % 4)
+    try:
+        b = base64.b64decode(sb64, validate=False)  # type: ignore
+    except Exception:
+        return ""
+    if len(b) == 64:
+        return b.hex()
+    if len(b) and b[0] == 0x30:
+        return _der_to_rs_hex(b)
+    return b.hex()
+
+
+def _ensure_signhere_home():
+    """signhere has no --home flag; ensure ~/.arkeo points at ARKEOD_HOME."""
+    try:
+        target = Path(SIGNHERE_HOME)
+        arkeod_home = Path(ARKEOD_HOME)
+        if target.resolve() == arkeod_home.resolve():
+            return
+        if target.exists() or target.is_symlink():
             try:
-                sock.sendall(b"ping\n")
+                target.unlink()
             except Exception:
                 pass
+        if arkeod_home.exists():
+            target.symlink_to(arkeod_home)
+    except Exception:
+        pass
+
+
+def _build_arkeo_meta_clean(active: dict | None, nonce: int | None, svc_id: int, service: str, provider: str, client: str, sentinel: str, response_time_sec: float):
+    base = _build_arkeo_meta(active, nonce)
+    # strip noisy fields
+    for k in ("provider", "client", "duration", "deposit", "nonce_used_for_this_request", "arkeod_node"):
+        base.pop(k, None)
+    meta = {
+        **base,
+        "contract_id": str(active.get("id")) if active else "",
+        "nonce_request": base.get("nonce_request") or nonce,
+        "provider_pubkey": provider,
+        "response_time_sec": response_time_sec,
+        "sentinel": sentinel,
+        "service_id": svc_id,
+        "service_name": service,
+        "subscriber_pubkey": client,
+    }
+    return {k: meta[k] for k in sorted(meta.keys())}
+
+
+def _sign_message(
+    client_key: str, contract_id: str, nonce: int, sign_template: str = PROXY_SIGN_TEMPLATE
+) -> tuple[str | None, str]:
+    preimage = sign_template.format(contract_id=contract_id, nonce=nonce)
+            # signhere has no home/keyring flags; ensure ~/.arkeo -> ARKEOD_HOME exists, then call plainly.
+    _ensure_signhere_home()
+    cmd = f'signhere -u "{client_key}" -m "{preimage}" | tail -n 1'
+    code, out = run(cmd)
+    out_clean = out.strip() if isinstance(out, str) else ""
+    if code != 0 or not out_clean:
+        return None, f"signhere_exit={code} output={out_clean}"
+    sig_hex = _b64_or_hex_to_rs_hex(out_clean).lower()
+    if not sig_hex or len(sig_hex) != 128:
+        return None, f"sig_parse_failed len={len(sig_hex)} raw={out_clean}"
+    return sig_hex, ""
+
+
+def _forward_to_sentinel(sentinel: str, service: str, body: bytes, arkauth: str, timeout: int = PROXY_TIMEOUT_SECS, as_header: bool = False):
+    url = f"{sentinel.rstrip('/')}/{service}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if as_header:
+        headers["arkauth"] = arkauth
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    else:
+        url = f"{url}?arkauth={urllib.parse.quote(arkauth, safe='')}"
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read(), dict(r.getheaders())
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+    except Exception as e:
+        return 502, json.dumps({"error": "proxy_upstream_error", "detail": str(e)}).encode(), {"Content-Type": "application/json"}
+
+
+_TXHASH_RE = re.compile(r'(?i)\btxhash\b[:\s"]+([0-9A-Fa-f]{64})')
+
+
+def _create_contract_now(cfg: dict, client_pub: str) -> tuple[str | None, str, int]:
+    max_dep = _safe_int(cfg.get("max_deposit", PROXY_MAX_DEPOSIT), _safe_int(PROXY_MAX_DEPOSIT, 0))
+    dep_raw = _safe_int(cfg.get("create_deposit", "0"), 0)
+    if dep_raw <= 0:
+        rate_amt = _parse_rate_amount(cfg.get("create_rate", PROXY_CREATE_RATE))
+        dur = _safe_int(cfg.get("create_duration", PROXY_CREATE_DURATION), _safe_int(PROXY_CREATE_DURATION, 0))
+        qpm = _safe_int(cfg.get("create_qpm", PROXY_CREATE_QPM), _safe_int(PROXY_CREATE_QPM, 0))
+        dep_raw = rate_amt * dur * qpm
+    dep = dep_raw
+    if max_dep and dep > max_dep:
+        dep = max_dep
+    cmd = (
+        'arkeod tx arkeo open-contract '
+        f'--home "{ARKEOD_HOME}" '
+        f'"{cfg.get("create_provider_pubkey","")}" '
+        f'"{cfg.get("service_name","")}" '
+        f'"{client_pub}" '
+        f'"{_safe_int(cfg.get("create_type","1"))}" '
+        f'"{dep}" '
+        f'"{_safe_int(cfg.get("create_duration", PROXY_CREATE_DURATION))}" '
+        f'"{cfg.get("create_rate", PROXY_CREATE_RATE)}" '
+        f'"{_safe_int(cfg.get("create_qpm", PROXY_CREATE_QPM))}" '
+        f'"{_safe_int(cfg.get("create_settlement", PROXY_CREATE_SETTLEMENT))}" '
+        f'"{_safe_int(cfg.get("create_authz","0"))}" '
+        f'"{cfg.get("create_delegate","")}" '
+        f'--from="{cfg.get("client_key","")}" '
+        f'--fees="{cfg.get("create_fees", PROXY_CREATE_FEES)}" '
+        f'--keyring-backend="{cfg.get("keyring_backend","test")}" '
+        f'--node "{cfg.get("node_rpc")}" '
+        f'--chain-id "{cfg.get("chain_id")}" '
+        "--gas auto --gas-adjustment 1.2 "
+        "--yes --output json"
+    )
+    code, out = run(cmd)
+    if code != 0:
+        return None, out, dep
+    try:
+        j = json.loads(out)
+        txh = j.get("txhash") or j.get("TxHash") or ""
+        if isinstance(txh, list):
+            txh = txh[0] if txh else ""
+        if txh:
+            return txh, out, dep
+    except json.JSONDecodeError:
+        pass
+    m = _TXHASH_RE.search(out)
+    if m:
+        return m.group(1), out, dep
+    return None, out, dep
+
+
+def _wait_for_new_contract(cfg: dict, client_pub: str, svc_id: int, start_height: int, wait_sec: int) -> dict | None:
+    deadline = time.time() + wait_sec
+    node = cfg.get("node_rpc") or ARKEOD_NODE
+    provider_filter = cfg.get("create_provider_pubkey") or cfg.get("provider_pubkey")
+    while time.time() < deadline:
+        contracts = _fetch_contracts(node)
+        cur_h = _get_current_height(node)
+        c = _select_active_contract(contracts, client_pub, svc_id, cur_h, provider_filter=provider_filter)
+        if c and _safe_int(c.get("height")) >= start_height:
+            return c
+        time.sleep(_safe_int(cfg.get("create_backoff_sec", 2), 2))
+    return None
+
+
+class PaygProxyHandler(BaseHTTPRequestHandler):
+    server_version = "ArkeoPaygProxy/1.0"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args):
+        # Silence default stderr logging; handled via per-listener logger
+        if hasattr(self.server, "logger") and self.server.logger:
             try:
-                data = sock.recv(1024)
-            except socket.timeout:
-                data = b""
-            text = data.decode("utf-8", errors="replace")
-            return True, text, None
+                self.server.logger.info(format % args)
+            except Exception:
+                pass
+
+    def _log(self, level: str, msg: str):
+        logger = getattr(self.server, "logger", None)
+        if not logger:
+            return
+        fn = getattr(logger, level, None)
+        if callable(fn):
+            try:
+                fn(msg)
+            except Exception:
+                pass
+
+    def _client_ip(self, trust_forwarded: bool) -> str:
+        if trust_forwarded:
+            xr = self.headers.get("X-Real-Ip", "")
+            if xr:
+                return xr.split(",")[0].strip()
+            xf = self.headers.get("X-Forwarded-For", "")
+            if xf:
+                return xf.split(",")[0].strip()
+        ip = self.client_address[0]
+        if ":" in ip and ip.count(":") == 1:
+            ip = ip.split(":")[0]
+        return ip
+
+    def _send_json(self, status: int, payload: dict, extra_headers: dict | None = None):
+        body_bytes = json.dumps(payload, indent=2).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body_bytes)))
+        self.send_header("Connection", "close")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
+        self.end_headers()
+        try:
+            self.wfile.write(body_bytes)
+            self.wfile.flush()
+        except Exception:
+            pass
+        self.close_connection = True
+
+    def do_GET(self):
+        if self.path.strip("/").split("?")[0] == "status":
+            payload = {
+                "client_pub_local": getattr(self.server, "client_pubkey", ""),
+                "active_contract": getattr(self.server, "active_contract", None),
+                "last_code": getattr(self.server, "last_code", None),
+                "last_nonce": getattr(self.server, "last_nonce", None),
+                "provider_pubkey": self.server.cfg.get("provider_pubkey"),
+                "service_id": self.server.cfg.get("service_id"),
+                "service_name": self.server.cfg.get("service_name"),
+                "sentinel": self.server.cfg.get("provider_sentinel_api"),
+                "height": None,
+            }
+            try:
+                payload["height"] = _get_current_height(self.server.cfg.get("node_rpc"))
+            except Exception:
+                payload["height"] = None
+            return self._send_json(200, payload)
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        cfg = self.server.cfg
+        node = cfg.get("node_rpc") or ARKEOD_NODE
+        sentinel = cfg.get("provider_sentinel_api") or SENTINEL_URI_DEFAULT
+        service = cfg.get("service_name") or cfg.get("service_slug") or cfg.get("service_id") or ""
+        svc_id = _safe_int(cfg.get("service_id"), 0)
+        client_key = cfg.get("client_key") or KEY_NAME
+        try:
+            length = _safe_int(self.headers.get("Content-Length", "0"))
+        except Exception:
+            length = 0
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        self._log("info", f"req start service={service} svc_id={svc_id} provider_filter={cfg.get('provider_pubkey')} sentinel={sentinel} bytes={len(body)}")
+
+        # IP whitelist
+        wl = _parse_whitelist(cfg.get("whitelist_ips") or PROXY_WHITELIST_IPS)
+        allow_all = any(ip == "0.0.0.0" for ip in wl)
+        if not allow_all:
+            client_ip = self._client_ip(str(cfg.get("trust_forwarded", PROXY_TRUST_FORWARDED)).lower() in ("1", "true", "yes", "on"))
+            if client_ip not in wl:
+                self._log("warning", f"whitelist block ip={client_ip} wl={wl}")
+                meta = _build_arkeo_meta(getattr(self.server, "active_contract", None), None)
+                headers = {
+                    "X-Arkeo-Contract-Id": meta.get("contract_id", ""),
+                    "X-Arkeo-Nonce": str(meta.get("nonce_request", "")),
+                    "X-Arkeo-Cost": meta.get("cost_request", ""),
+                }
+                return self._send_json(403, {"arkeo": meta_full_clean, "error": "ip not whitelisted", "ip": client_ip}, extra_headers=headers)
+        self._log("info", "whitelist ok")
+
+        # ensure we have client pubkey
+        client_pub = getattr(self.server, "client_pubkey", "") or ""
+        if not client_pub:
+            raw, bech, err = derive_pubkeys(client_key, KEYRING)
+            if err:
+                self._log("error", f"client_pubkey_error: {err}")
+                return self._send_json(500, {"error": "client_pubkey_error", "detail": err})
+            client_pub = bech
+            self.server.client_pubkey = bech
+
+        # refresh contract if expired/missing
+        cur_h = _get_current_height(node)
+        active = getattr(self.server, "active_contract", None)
+        provider_filter = cfg.get("provider_pubkey")
+        if not active or (_safe_int(active.get("height")) + _safe_int(active.get("duration")) <= cur_h):
+            t0 = time.time()
+            contracts = _fetch_contracts(node, timeout=PROXY_CONTRACT_TIMEOUT)
+            if not contracts and (time.time() - t0) >= PROXY_CONTRACT_TIMEOUT:
+                self._log("error", "contract_lookup_timeout")
+                return self._send_json(503, {"error": "contract_lookup_timeout"})
+            self._log("info", f"contracts fetched count={len(contracts) if isinstance(contracts,list) else 0}")
+            active = _select_active_contract(contracts, client_pub, svc_id, cur_h, provider_filter=provider_filter)
+            self.server.active_contract = active
+            if active:
+                self._log("info", f"selected contract id={active.get('id')} provider={active.get('provider')} svc={active.get('service')}")
+            else:
+                self._log("info", f"no contract match; looking for client={client_pub} service_id={svc_id} provider={provider_filter or 'any'}")
+
+        if not active and str(cfg.get("auto_create", PROXY_AUTO_CREATE)).lower() in ("1", "true", "yes", "on"):
+            self._log("info", "no active contract -> attempting auto-create")
+            start_h = _get_current_height(node)
+            txh, tx_raw, dep_used = _create_contract_now(cfg, client_pub)
+            self._log("info", f"open-contract attempt deposit={dep_used} rate={cfg.get('create_rate', PROXY_CREATE_RATE)} dur={cfg.get('create_duration', PROXY_CREATE_DURATION)} qpm={cfg.get('create_qpm', PROXY_CREATE_QPM)} settlement={cfg.get('create_settlement', PROXY_CREATE_SETTLEMENT)} provider={cfg.get('create_provider_pubkey') or provider_filter}")
+            if tx_raw:
+                self._log("info", f"open-contract response: {tx_raw[:400]}")
+            if txh:
+                self._log("info", f"open-contract txhash={txh}")
+                nc = _wait_for_new_contract(cfg, client_pub, svc_id, start_h, _safe_int(cfg.get("create_timeout_sec", PROXY_CREATE_TIMEOUT), PROXY_CREATE_TIMEOUT))
+                if nc:
+                    active = nc
+                    self.server.active_contract = nc
+                    self._log("info", f"auto-created contract id={nc.get('id')} height={nc.get('height')}")
+
+        if not active:
+            self._log("error", "no_active_contract")
+            meta = _build_arkeo_meta_clean(active, None, svc_id, service, "", client_pub, sentinel, 0)
+            headers = {
+                "X-Arkeo-Contract-Id": meta.get("contract_id", ""),
+                "X-Arkeo-Nonce": str(meta.get("nonce_request", "")),
+                "X-Arkeo-Cost": meta.get("cost_request", ""),
+            }
+            return self._send_json(503, {"arkeo": meta, "error": "no_active_contract"}, extra_headers=headers)
+
+        cid = str(active.get("id"))
+        contract_client = str(active.get("client", ""))
+        if contract_client and contract_client != client_pub:
+            self._log("error", f"client_key_mismatch contract_client={contract_client} local={client_pub}")
+            meta = _build_arkeo_meta_clean(active, None, svc_id, service, active.get("provider") if active else "", contract_client, sentinel, 0)
+            headers = {
+                "X-Arkeo-Contract-Id": meta.get("contract_id", ""),
+                "X-Arkeo-Nonce": str(meta.get("nonce_request", "")),
+                "X-Arkeo-Cost": meta.get("cost_request", ""),
+            }
+            return self._send_json(503, {"arkeo": meta, "error": "client_key_mismatch"}, extra_headers=headers)
+
+        nonce = _claims_highest_nonce(sentinel, cid, contract_client) + 1
+        sig_hex, sig_err = _sign_message(
+            client_key, cid, nonce, cfg.get("sign_template", PROXY_SIGN_TEMPLATE)
+        )
+        if not sig_hex:
+            self._log("error", f"sign_failed: {sig_err}")
+            meta = _build_arkeo_meta_clean(active, nonce, svc_id, service, active.get("provider") if active else "", contract_client, sentinel, response_time_sec)
+            headers = {
+                "X-Arkeo-Contract-Id": meta.get("contract_id", ""),
+                "X-Arkeo-Nonce": str(meta.get("nonce_request", "")),
+                "X-Arkeo-Cost": meta.get("cost_request", ""),
+            }
+            return self._send_json(
+                500,
+                {"arkeo": meta, "error": "sign_failed", "detail": sig_err},
+                extra_headers=headers,
+            )
+
+        arkauth4 = f"{cid}:{contract_client}:{nonce}:{sig_hex}"
+        self._log("info", f"forwarding 4-part to sentinel={sentinel} svc={service} cid={cid} nonce={nonce}")
+        t0 = time.time()
+        code, resp_body, _ = _forward_to_sentinel(
+            sentinel,
+            service,
+            body,
+            arkauth4,
+            timeout=_safe_int(cfg.get("timeout_secs", PROXY_TIMEOUT_SECS), PROXY_TIMEOUT_SECS),
+            as_header=bool(cfg.get("arkauth_as_header", PROXY_ARKAUTH_AS_HEADER)),
+        )
+        if code == 401:
+            self._log("warning", "401 on 4-part arkauth -> retrying 3-part")
+            arkauth3 = f"{cid}:{nonce}:{sig_hex}"
+            code, resp_body, _ = _forward_to_sentinel(
+                sentinel,
+                service,
+                body,
+                arkauth3,
+                timeout=_safe_int(cfg.get("timeout_secs", PROXY_TIMEOUT_SECS), PROXY_TIMEOUT_SECS),
+                as_header=bool(cfg.get("arkauth_as_header", PROXY_ARKAUTH_AS_HEADER)),
+            )
+        response_time_sec = time.time() - t0
+
+        meta_full = _build_arkeo_meta_clean(active, nonce, svc_id, service, active.get("provider"), contract_client, sentinel, response_time_sec)
+        self.server.last_code = code
+        self.server.last_nonce = nonce
+        self._log("info", f"proxy done code={code} cid={cid} nonce={nonce}")
+        decorate = str(cfg.get("decorate_response", PROXY_DECORATE_RESPONSE)).lower() in ("1", "true", "yes", "on")
+
+        try:
+            body_text = resp_body.decode() if isinstance(resp_body, (bytes, bytearray)) else str(resp_body)
+        except Exception:
+            body_text = ""
+
+        if decorate:
+            try:
+                upstream = json.loads(body_text)
+            except Exception:
+                upstream = body_text
+            return self._send_json(code, {"arkeo": meta_full, "response": upstream})
+
+        if isinstance(resp_body, (bytes, bytearray)):
+            out_bytes = resp_body
+        else:
+            out_bytes = str(resp_body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out_bytes)))
+        self.send_header("Connection", "close")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Arkeo-Contract-Id", cid)
+        self.send_header("X-Arkeo-Nonce", str(nonce))
+        if meta_full.get("cost_request"):
+            self.send_header("X-Arkeo-Cost", meta_full.get("cost_request"))
+        self.end_headers()
+        try:
+            self.wfile.write(out_bytes)
+            self.wfile.flush()
+        except Exception:
+            pass
+        self.close_connection = True
+
+
+class PaygProxyServer(socketserver.ThreadingMixIn, HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+
+def _test_payload_for_service(service_id, service_name):
+    """Return (body_bytes, headers_dict, method_label) for a simple test."""
+    name = (service_name or "").lower()
+    sid = str(service_id or "")
+    # Default EVM-style test
+    method = "eth_blockNumber"
+    body = {"jsonrpc": "2.0", "method": method, "params": [], "id": 1}
+    headers = {"Content-Type": "application/json"}
+    label = f"{method} JSON-RPC"
+    return json.dumps(body).encode(), headers, label
+
+
+def _test_listener_port(port: int, payload: bytes, headers: dict, timeout: float = 5.0) -> tuple[bool, str | None, str | None]:
+    """Attempt a JSON-RPC POST against the listener."""
+    url = f"http://127.0.0.1:{port}/"
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            return True, body, None
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = None
+        return False, body, f"HTTP {e.code}: {e.reason}"
     except Exception as e:
         return False, None, str(e)
 
@@ -1734,6 +2564,9 @@ def _sanitize_listener_payload(payload: dict, existing_ports: set[int], current_
     status = (payload.get("status") or "").strip() or "inactive"
     service_id_val = payload.get("service_id") or payload.get("service")
     service_id = str(service_id_val).strip() if service_id_val not in (None, "") else ""
+    provider_pubkey = (payload.get("provider_pubkey") or "").strip()
+    sentinel_url = (payload.get("sentinel_url") or "").strip()
+    whitelist_ips = (payload.get("whitelist_ips") or "").strip()
     port_val = payload.get("port")
     port: int | None = None
     if port_val not in (None, ""):
@@ -1750,6 +2583,9 @@ def _sanitize_listener_payload(payload: dict, existing_ports: set[int], current_
         "status": status,
         "port": port,
         "service_id": service_id,
+        "provider_pubkey": provider_pubkey,
+        "sentinel_url": sentinel_url,
+        "whitelist_ips": whitelist_ips,
     }, None
 
 
@@ -1792,6 +2628,17 @@ def create_listener():
     svc_lookup = _load_active_service_types_lookup()
     svc_meta = svc_lookup.get(clean.get("service_id") or "", {})
     best = _top_active_services_by_payg(clean.get("service_id") or "", limit=3)
+    provider_pk = (clean.get("provider_pubkey") or "").strip() or None
+    provider_mon = None
+    sentinel_url = (clean.get("sentinel_url") or "").strip() or None
+    if best and not provider_pk:
+        provider_pk = best[0].get("provider_pubkey")
+        provider_mon = best[0].get("provider_moniker")
+        mu = best[0].get("metadata_uri")
+        if _is_external(mu):
+            sentinel_url = _sentinel_from_metadata_uri(mu)
+    if not sentinel_url:
+        sentinel_url = SENTINEL_URI_DEFAULT
     new_entry = {
         "id": payload.get("id") or str(int(time.time() * 1000)),
         "target": "",
@@ -1800,7 +2647,11 @@ def create_listener():
         "service_id": clean.get("service_id") or "",
         "service_name": svc_meta.get("service_name", ""),
         "service_description": svc_meta.get("service_description", ""),
+        "provider_pubkey": provider_pk,
+        "provider_moniker": provider_mon,
+        "sentinel_url": sentinel_url,
         "top_services": best,
+        "whitelist_ips": clean.get("whitelist_ips") or "",
         "created_at": now,
         "updated_at": now,
     }
@@ -1839,6 +2690,17 @@ def update_listener(listener_id: str):
     best = _top_active_services_by_payg(clean.get("service_id") or "", limit=3)
     updated = None
     old_snapshot = None
+    provider_pk = (clean.get("provider_pubkey") or "").strip() or None
+    provider_mon = None
+    sentinel_url = (clean.get("sentinel_url") or "").strip() or None
+    if best and not provider_pk:
+        provider_pk = best[0].get("provider_pubkey")
+        provider_mon = best[0].get("provider_moniker")
+        mu = best[0].get("metadata_uri")
+        if _is_external(mu):
+            sentinel_url = _sentinel_from_metadata_uri(mu)
+    if not sentinel_url:
+        sentinel_url = SENTINEL_URI_DEFAULT
     for l in listeners:
         if not isinstance(l, dict):
             continue
@@ -1852,7 +2714,11 @@ def update_listener(listener_id: str):
         l["service_id"] = clean.get("service_id") or ""
         l["service_name"] = svc_meta.get("service_name", "")
         l["service_description"] = svc_meta.get("service_description", "")
+        l["provider_pubkey"] = provider_pk or l.get("provider_pubkey")
+        l["provider_moniker"] = provider_mon or l.get("provider_moniker")
+        l["sentinel_url"] = sentinel_url or l.get("sentinel_url")
         l["top_services"] = best
+        l["whitelist_ips"] = clean.get("whitelist_ips") if clean.get("whitelist_ips") is not None else l.get("whitelist_ips", "")
         l["updated_at"] = _timestamp()
         updated = l
         break
@@ -1948,7 +2814,7 @@ def refresh_listener_top_services(listener_id: str):
 
 @app.get("/api/listeners/<listener_id>/test")
 def test_listener(listener_id: str):
-    """Test connectivity to a listener port."""
+    """Test connectivity to a listener port (eth_blockNumber JSON-RPC)."""
     data = _ensure_listeners_file()
     listeners = data.get("listeners") if isinstance(data, dict) else []
     if not isinstance(listeners, list):
@@ -1966,9 +2832,17 @@ def test_listener(listener_id: str):
         port = int(target.get("port"))
     except Exception:
         return jsonify({"error": "invalid port"}), 400
-    ok, resp, err = _test_listener_port(port)
-    cmd = f"curl -v http://127.0.0.1:{port}/"
+    payload_bytes, headers, label = _test_payload_for_service(target.get("service_id"), target.get("service_name"))
+    ok, resp, err = _test_listener_port(port, payload_bytes, headers)
+    headers_cli = " ".join([f"-H '{k}: {v}'" for k, v in headers.items()])
+    cmd = (
+        "curl -X POST http://127.0.0.1:"
+        f"{port} {headers_cli} "
+        f"--data '{payload_bytes.decode()}'"
+    )
     payload = {"ok": ok, "port": port, "command": cmd}
+    if label:
+        payload["test"] = label
     if resp:
         payload["response"] = resp
     if err:
