@@ -1,7 +1,10 @@
-# Arkeo Provider Admin (Docker)
+# Arkeo Provider Admin (Docker Image)
 
-Containerized admin UI, API, and sentinel reverse-proxy for Arkeo providers.
+Containerized admin UI + API paired with the Arkeo sentinel service reverse-proxy that onboards your node as an Arkeo provider, manages the provider hot wallet, bonds services, and announces them to the Arkeo Data Marketplace for pay-as-you-go access.
 
+![Provider admin UI overview](../images/readme-providers-1.png)
+
+## Install Docker on you host
 Before you start, install Docker on your host and be comfortable with basic Docker commands (start/stop, logs, pull). Use your OS vendor’s Docker docs.
 
 ## Create the `provider.env` for the docker
@@ -46,6 +49,7 @@ docker run -d --name provider-core --restart=unless-stopped \
   ghcr.io/arkeonetwork/provider-core:latest
 ```
 
+## Using the Provider Core Admin
 - Open firewall for ports 8080 (admin UI), 9999 (admin API), 3636 (sentinel).
 - Admin UI: `http://<host>:8080`
 - Copy the Arkeo address shown at the top; fund the address with a small amount of ARKEO (hotwallet).

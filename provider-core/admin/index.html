@@ -798,6 +798,7 @@
         } catch (e) {
             const msg = [
                 "Failed to copy pubkey (clipboard is blocked in insecure contexts).",
+                "",
                 "You can copy it manually:",
                 val || "(unavailable)"
             ].join("\n");
@@ -820,6 +821,7 @@
         } catch (e) {
             const msg = [
                 "Failed to copy address (clipboard is blocked in insecure contexts).",
+                "",
                 "You can copy it manually:",
                 val
             ].join("\n");

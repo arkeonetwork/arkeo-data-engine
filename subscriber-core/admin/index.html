@@ -8,6 +8,7 @@
     <link rel="shortcut icon" href="images/favicon.ico">
 </head>
 <body>
+<div class="page">
 
 <div class="card header-card">
     <div class="row-between header-top">
@@ -106,7 +107,7 @@
             </div>
         </div>
     </form>
-    <div id="listenersTable" class="mt-2"></div>
+<div id="listenersTable" class="mt-2"></div>
 </div>
 
 <div class="card footer-card">
@@ -125,6 +126,10 @@
         </div>
     </div>
 </div>
+
+<div id="listenerLogs" class="section log-container"></div>
+
+</div> <!-- /page -->
 
 <div id="resultModal" class="overlay hidden">
     <div class="overlay-card modal-card">
@@ -261,10 +266,7 @@
             if (fallbackOk) {
                 showResultModal(msgTitle, `Pubkey copied (fallback):\n${val}`);
             } else {
-                showResultModal(
-                    msgTitle,
-                    `Failed to copy. Clipboard access may require HTTPS. Here is the value:\n${val}`
-                );
+                showResultModal(msgTitle, `Failed to copy pubkey (clipboard is blocked in insecure contexts).\n\nYou can copy it manually:\n${val}`);
             }
         }
     }
@@ -294,10 +296,7 @@
             if (fallbackOk) {
                 showResultModal(msgTitle, `Address copied (fallback):\n${val}`);
             } else {
-                showResultModal(
-                    msgTitle,
-                    `Failed to copy. Clipboard access may require HTTPS. Here is the value:\n${val}`
-                );
+                showResultModal(msgTitle, `Failed to copy address (clipboard is blocked in insecure contexts).\n\nYou can copy it manually:\n${val}`);
             }
         }
     }
@@ -313,7 +312,8 @@
                 "Active Providers: deriving...",
                 "Active Services: deriving...",
                 "Subscribers: deriving..."
-            ].join("\n");
+            ].join("\n") +
+            "\n\nPlease wait...";
         if (statusEl) statusEl.textContent = "Refreshing cache...";
         if (btn) btn.disabled = true;
         // keep syncing state across full refresh flow to avoid flicker
@@ -372,7 +372,7 @@
             };
             const orderedKeys = ["provider-services","provider-contracts","service-types","active_providers","active_services","subscribers"];
             const summary = orderedKeys.filter(k => k in results).map(k => summarize(k, results[k])).join("\n");
-            const finishedMsg = `Finished cache refresh at ${new Date().toISOString()}\n${summary || "(no results)"}`;
+            const finishedMsg = `Finished cache refresh at ${new Date().toISOString()}\n${summary || "(no results)"}\n\nSync is complete, it is ok to close this modal window now.`;
             if (statusEl) statusEl.textContent = `Last refresh: ${new Date().toLocaleString()}`;
             updateModalBody(finishedMsg);
             // refresh header and listeners after cache refresh
@@ -569,6 +569,36 @@
         if (modal) modal.classList.add("hidden");
     }
 
+    function copyListenerEndpoint(endpoint) {
+        const title = "Copy Listener Endpoint";
+        const val = endpoint || "";
+        if (!val || val === "–") {
+            showResultModal(title, "Endpoint unavailable");
+            return;
+        }
+        const msg = val;
+        const fallbackMsg = `Failed to copy endpoint (clipboard is blocked in insecure contexts).\n\nYou can copy it manually:\n${val}`;
+        navigator.clipboard.writeText(msg).then(() => {
+            showResultModal(title, `Endpoint copied:\n${val}`);
+        }).catch(() => {
+            try {
+                const ta = document.createElement("textarea");
+                ta.value = msg;
+                document.body.appendChild(ta);
+                ta.select();
+                const ok = document.execCommand("copy");
+                document.body.removeChild(ta);
+                if (ok) {
+                    showResultModal(title, `Endpoint copied:\n${val}`);
+                    return;
+                }
+            } catch (e) {
+                /* ignore */
+            }
+            showResultModal(title, fallbackMsg);
+        });
+    }
+
     // ─────────────────────────────
     // Listener registry UI helpers
     // ─────────────────────────────
@@ -641,6 +671,7 @@
                 rangeEl.textContent = `Ports ${data.port_range[0]}-${data.port_range[1]}`;
             }
             renderListenersTable();
+            renderListenerLogs();
             if (!serviceTypesCache.length) {
                 refreshServiceTypes(true);
             }
@@ -670,18 +701,54 @@
             const statusSelect = buildStatusSelect(l.status, `editStatus-${l.id}`);
             const topServices = Array.isArray(l.top_services) ? l.top_services : [];
             const whitelist = l.whitelist_ips ? escapeHtml(l.whitelist_ips) : "0.0.0.0 (all)";
+            const hostForListener = window.location.hostname || "localhost";
+            const protoForListener = (window.location.protocol || "").startsWith("https") ? "https" : "http";
+            const endpointUrl = portSafe ? `${protoForListener}://${hostForListener}:${portSafe}` : "–";
             const topServicesDisplay = topServices.length
-                ? topServices.map((bp, idx) => {
-                    const pk = bp && bp.provider_pubkey ? formatPubkeyShort(bp.provider_pubkey) : "(unknown)";
-                    const mon = bp && bp.provider_moniker;
-                    const name = mon && mon !== "(Inactive)" ? mon : `${pk} (Inactive)`;
-                    const rate = bp && bp.pay_as_you_go_rate && bp.pay_as_you_go_rate.amount !== undefined
-                        ? `${bp.pay_as_you_go_rate.amount}${bp.pay_as_you_go_rate.denom || ""} / tx`
-                        : "";
-                    const right = [rate].filter(Boolean).join(" | ");
-                    const order = `${idx + 1}`;
-                    return `${order} | ${name}${right ? ` | ${right}` : ""}`;
-                }).join("<br>")
+                ? (() => {
+                    const rows = topServices.map((bp, idx) => {
+                        const mon = bp && bp.provider_moniker;
+                        const inactive = !mon || mon === "(Inactive)";
+                        const name = mon || "(unknown)";
+                        const rate = bp && bp.pay_as_you_go_rate && bp.pay_as_you_go_rate.amount !== undefined
+                            ? `${bp.pay_as_you_go_rate.amount}${bp.pay_as_you_go_rate.denom || ""} / tx`
+                            : "";
+                        const arrows = isEditing
+                            ? `<div class="top-service-actions">
+                                    <button class="copy-btn" ${idx === 0 ? "disabled" : ""} onclick="moveTopService('${l.id}', ${idx}, -1)">↑</button>
+                                    <button class="copy-btn" ${idx === topServices.length - 1 ? "disabled" : ""} onclick="moveTopService('${l.id}', ${idx}, 1)">↓</button>
+                               </div>`
+                            : "";
+                        const statusVal = bp && bp.status ? String(bp.status) : "";
+                        const statusDot = statusVal.toLowerCase() === "up"
+                            ? '<span class="status-dot dot-ok"></span>'
+                            : statusVal.toLowerCase() === "down"
+                                ? '<span class="status-dot dot-err"></span>'
+                                : "—";
+                        let rtDisplay = "—";
+                        if (bp && bp.rt_avg_ms !== undefined && bp.rt_avg_ms !== null) {
+                            const avgMs = Number(bp.rt_avg_ms);
+                            if (!Number.isNaN(avgMs)) {
+                                rtDisplay = `${Math.round(avgMs)} ms`;
+                            }
+                        }
+                        return `<tr>
+                            <td class="ts-col-num">${idx + 1}</td>
+                            <td class="ts-col-name">${escapeHtml(name)}${inactive ? " (Inactive)" : ""}</td>
+                            <td class="ts-col-rate">${escapeHtml(rate)}</td>
+                            <td class="ts-col-status">${statusDot}</td>
+                            <td class="ts-col-rt">${escapeHtml(rtDisplay)}</td>
+                            ${isEditing ? `<td class="ts-col-actions">${arrows}</td>` : ""}
+                        </tr>`;
+                    }).join("");
+                    const head = isEditing
+                        ? `<tr><th>#</th><th>Provider</th><th>Price</th><th>Status</th><th>Response Time</th><th></th></tr>`
+                        : `<tr><th>#</th><th>Provider</th><th>Price</th><th>Status</th><th>Response Time</th></tr>`;
+                    return `<table class="top-services-table">
+                        <thead>${head}</thead>
+                        <tbody>${rows}</tbody>
+                    </table>`;
+                })()
                 : "—";
             if (isEditing) {
                 return `
@@ -707,6 +774,15 @@
                 </tr>
                 <tr class="listener-sub">
                     <td colspan="4">
+                        <div class="muted small">Endpoint:</div>
+                        <div class="muted endpoint-row">
+                            <span class="mono">${escapeHtml(endpointUrl)}</span>
+                            ${portSafe ? `<button class="copy-btn" onclick="copyListenerEndpoint('${escapeHtml(endpointUrl)}')">Copy</button>` : ""}
+                        </div>
+                    </td>
+                </tr>
+                <tr class="listener-sub">
+                    <td colspan="4">
                         <div class="muted small">Top services (sorted by lowest PAYG):</div>
                         <div class="muted">${topServicesDisplay}</div>
                     </td>
@@ -722,8 +798,8 @@
                 <td>${escapeHtml(svcLabel || "—")}</td>
                 <td class="mono">${portSafe || "–"}</td>
                 <td class="listener-actions-cell col-actions">
-                    <button class="primary" onclick="testListener('${l.id}')">Test</button>
-                    <button class="primary" onclick="refreshTopServices('${l.id}')">Refresh</button>
+                    <button class="btn-ghost" onclick="testListener('${l.id}')">Test</button>
+                    <button class="btn-ghost" onclick="refreshTopServices('${l.id}')">Refresh</button>
                     <button class="primary" onclick="editListener('${l.id}')">Edit</button>
                     <button class="primary danger-btn" onclick="deleteListener('${l.id}')">Delete</button>
                 </td>
@@ -736,6 +812,15 @@
             </tr>
             <tr class="listener-sub">
                 <td colspan="4">
+                    <div class="muted small">Endpoint:</div>
+                    <div class="muted endpoint-row">
+                        <span class="mono">${escapeHtml(endpointUrl)}</span>
+                        ${portSafe ? `<button class="copy-btn" onclick="copyListenerEndpoint('${escapeHtml(endpointUrl)}')">Copy</button>` : ""}
+                    </div>
+                </td>
+            </tr>
+            <tr class="listener-sub">
+                <td colspan="4">
                     <div class="muted small">Top services:</div>
                     <div class="muted">${topServicesDisplay}</div>
                 </td>
@@ -744,7 +829,7 @@
             </tbody>`;
         }).join("");
         container.innerHTML = `<div class="table-wrap">
-            <table class="table">
+            <table class="table listeners-table">
                 <thead>
                     <tr><th class="col-status">Status</th><th>Service Type</th><th>Port</th><th class="col-actions">Actions</th></tr>
                 </thead>
@@ -809,8 +894,12 @@
         const svcId = document.getElementById(`editService-${id}`)?.value || "";
         const status = document.getElementById(`editStatus-${id}`)?.value || "";
         const whitelist = document.getElementById(`editWhitelist-${id}`)?.value || "";
+        const current = listenersCache.find((l) => String(l.id) === String(id));
         const body = { status, whitelist_ips: whitelist };
         if (svcId) body.service_id = svcId;
+        if (current && Array.isArray(current.top_services)) {
+            body.top_services = current.top_services;
+        }
         try {
             const res = await fetch(apiUrl(`/api/listeners/${encodeURIComponent(id)}`), {
                 method: "PUT",
@@ -832,6 +921,18 @@
         }
     }
 
+    function moveTopService(listenerId, idx, delta) {
+        const l = listenersCache.find((x) => String(x.id) === String(listenerId));
+        if (!l || !Array.isArray(l.top_services)) return;
+        const newIdx = idx + delta;
+        if (newIdx < 0 || newIdx >= l.top_services.length) return;
+        const arr = [...l.top_services];
+        const [item] = arr.splice(idx, 1);
+        arr.splice(newIdx, 0, item);
+        l.top_services = arr;
+        renderListenersTable();
+    }
+
     async function deleteListener(id) {
         if (!confirm("Delete this listener?")) return;
         try {
@@ -849,7 +950,71 @@
         }
     }
 
+    // ─────────────────────────────
+    // Listener logs
+    // ─────────────────────────────
+    function scrollLogToBottom(pre) {
+        if (!pre) return;
+        pre.scrollTop = pre.scrollHeight;
+    }
+
+    async function fetchListenerLog(id, elId) {
+        const pre = document.getElementById(elId);
+        if (pre) pre.textContent = "Loading log...";
+        try {
+            const res = await fetch(apiUrl(`/api/listeners/${encodeURIComponent(id)}/logs?lines=200`), { cache: "no-store" });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || (data && data.error)) {
+                if (pre) pre.textContent = data && data.error ? `Error: ${data.error}` : `Error: ${res.status}`;
+                scrollLogToBottom(pre);
+                return;
+            }
+            const log = data && data.log ? data.log : "(no log)";
+            if (pre) pre.textContent = log || "(no log)";
+            scrollLogToBottom(pre);
+        } catch (e) {
+            if (pre) pre.textContent = `Error: ${e}`;
+            scrollLogToBottom(pre);
+        }
+    }
+
+    function renderListenerLogs() {
+        const container = document.getElementById("listenerLogs");
+        if (!container) return;
+        if (!listenersCache.length) {
+            container.innerHTML = "";
+            return;
+        }
+        const cards = listenersCache.map((l) => {
+            const portSafe = escapeHtml(l.port ?? "");
+            const svcLabel = l.service_description || formatServiceLabel(l.service_id) || "";
+            const logId = `log-${l.id}`;
+            return `
+            <div class="log-card">
+                <div class="row-between" style="align-items: center;">
+                    <h4>Port ${portSafe || "–"} ${svcLabel ? `| ${escapeHtml(svcLabel)}` : ""}</h4>
+                    <div class="log-actions">
+                        <button class="primary" onclick="fetchListenerLog('${l.id}', '${logId}')">Refresh</button>
+                    </div>
+            </div>
+            <pre id="${logId}" class="log-pre">(loading...)</pre>
+        </div>`;
+        }).join("");
+        container.innerHTML = cards;
+        listenersCache.forEach((l) => fetchListenerLog(l.id, `log-${l.id}`));
+    }
+
     async function testListener(id) {
+        const listener = listenersCache.find((l) => String(l.id) === String(id));
+        const port = listener && listener.port ? listener.port : "–";
+        const svcLabel = listener
+            ? (listener.service_description || formatServiceLabel(listener.service_id) || listener.service_name || listener.service_id || "")
+            : "";
+        const initialBody = `
+<div>Testing listener...</div>
+<div class="muted small">Port: ${escapeHtml(String(port))}${svcLabel ? ` • Service: ${escapeHtml(String(svcLabel))}` : ""}</div>
+<div class="muted small">Please wait...</div>`;
+        showResultModal("Test Listener", initialBody, true);
         try {
             const res = await fetch(apiUrl(`/api/listeners/${encodeURIComponent(id)}/test`), {
                 method: "GET",
@@ -897,6 +1062,7 @@
 <div>Response:</div>
 <pre class="mono">${respPretty}</pre>`;
             showResultModal("Test Listener", body, true);
+            await loadListeners();
         } catch (err) {
             showResultModal("Test Listener", `Failed to test listener: ${escapeHtml(String(err))}`);
         }
