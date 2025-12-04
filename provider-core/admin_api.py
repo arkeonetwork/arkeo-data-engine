@@ -1840,6 +1840,20 @@ def provider_claims():
                 results.append({"claim": claim, "error": "missing fields"})
                 continue
 
+            sig_str = str(signature)
+            sig_len = len(sig_str)
+            sig_hex = bool(re.fullmatch(r"[0-9a-fA-F]+", sig_str))
+            app.logger.info(
+                "provider-claims: claim candidate cid=%s nonce=%s sig_len=%s is_hex=%s sig_prefix=%s sig_suffix=%s spender=%s",
+                contract_id,
+                nonce,
+                sig_len,
+                sig_hex,
+                sig_str[:12],
+                sig_str[-12:] if sig_len >= 12 else sig_str,
+                claim.get("spender") or "",
+            )
+
             seq, seq_raw = current_sequence()
             if seq is None:
                 results.append({"claim": claim, "error": "failed to fetch sequence", "detail": seq_raw})
@@ -1870,7 +1884,7 @@ def provider_claims():
                     "--sequence",
                     str(seq_override),
                     "-b",
-                    "sync",
+                    "block",
                     "-y",
                     "-o",
                     "json",
