@@ -28,13 +28,14 @@ KEY_KEYRING_BACKEND=${KEY_KEYRING_BACKEND:-test}
 ARKEOD_HOME=${ARKEOD_HOME:-~/.arkeo}
 # Expand leading tilde if provided via env (e.g. "~/.arkeo")
 ARKEOD_HOME=${ARKEOD_HOME/#\~/$HOME}
-ARKEOD_NODE=${ARKEOD_NODE:-${EXTERNAL_ARKEOD_NODE:-tcp://provider1.innovationtheory.com:26657}}
+ARKEOD_NODE=${ARKEOD_NODE:-${EXTERNAL_ARKEOD_NODE:-tcp://host.docker.internal:26657}}
 RPC_URL_DEFAULT=${SENTINEL_RPC_URL:-$ARKEOD_NODE}
 # If rpc url is tcp:// convert to http:// for sentinel
 RPC_URL_DEFAULT=${RPC_URL_DEFAULT/tcp:\/\//http:\/\/}
 ADMIN_PORT=${ADMIN_PORT:-8080}
 # If provided, prefer ARKEO_REST_API_PORT as the provider hub URI default
 PROVIDER_HUB_URI=${PROVIDER_HUB_URI:-${ARKEO_REST_API_PORT:-}}
+ADMIN_API_PORT=${ADMIN_API_PORT:-9999}
 
 # Default sentinel-related envs (used by sentinel binary)
 # EVENT_STREAM_HOST needs host:port (no scheme); derive from ARKEOD_NODE if unset.
@@ -43,6 +44,8 @@ if [ -z "$EVENT_STREAM_HOST" ]; then
 fi
 EVENT_STREAM_HOST=${EVENT_STREAM_HOST:-127.0.0.1:26657}
 export EVENT_STREAM_HOST
+export ADMIN_PORT
+export ADMIN_API_PORT
 
 echo "Using:"
 echo "  KEY_NAME              = $KEY_NAME"

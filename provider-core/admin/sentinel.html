@@ -203,6 +203,9 @@
     const DEFAULT_ADMIN_API_PORT = "9999";
     let adminHost = (window.location && window.location.hostname) || "localhost";
     let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+    let adminPasswordEnabled = false;
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (url, options = {}) => realFetch(url, { credentials: "include", ...options });
 
     function buildBaseUrl(host, port) {
         const proto = (window.location && window.location.protocol === "https:") ? "https:" : "http:";
@@ -296,6 +299,51 @@
         el.style.display = show ? "flex" : "none";
     }
 
+    async function fetchAdminPasswordStatus(showGate = true) {
+        try {
+            const res = await fetch(resolveApi("/api/admin-password"), { cache: "no-store" });
+            const data = await res.json();
+            adminPasswordEnabled = !!(data && data.enabled);
+            const gateAuthed = sessionStorage.getItem("adminAuthed") === "1";
+            const gate = document.getElementById("adminPasswordGate");
+            if (gate) {
+                if (showGate && adminPasswordEnabled && !gateAuthed) {
+                    gate.classList.remove("hidden");
+                } else {
+                    gate.classList.add("hidden");
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    async function submitAdminPasswordGate(event) {
+        if (event && event.preventDefault) event.preventDefault();
+        const input = document.getElementById("adminPasswordGateInput");
+        const statusEl = document.getElementById("adminPasswordGateStatus");
+        const pwd = (input && input.value) || "";
+        if (statusEl) statusEl.textContent = "Verifying...";
+        try {
+            const res = await fetch(resolveApi("/api/login"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ password: pwd }),
+            });
+            const data = await res.json();
+            if (data && data.ok) {
+                sessionStorage.setItem("adminAuthed", "1");
+                const gate = document.getElementById("adminPasswordGate");
+                if (gate) gate.classList.add("hidden");
+                if (statusEl) statusEl.textContent = "";
+            } else if (statusEl) {
+                statusEl.textContent = "Incorrect password.";
+            }
+        } catch (e) {
+            if (statusEl) statusEl.textContent = `Failed to verify: ${e}`;
+        }
+    }
+
     async function exportSentinelBundle() {
         const resEl = document.getElementById("exportResult");
         if (resEl) {
@@ -352,8 +400,26 @@
         }
     }
 
-    window.addEventListener("load", loadInfo);
+    window.addEventListener("load", () => {
+        fetchAdminPasswordStatus(true);
+        loadInfo();
+    });
 </script>
+
+<div id="adminPasswordGate" class="overlay hidden">
+    <div class="overlay-card modal-card">
+        <h3>Admin Password Required</h3>
+        <p class="muted">Enter the admin password to continue.</p>
+        <form onsubmit="submitAdminPasswordGate(event); return false;">
+            <input type="text" name="admin-username-filler" autocomplete="username" value="admin" class="hidden" aria-hidden="true" tabindex="-1" />
+            <input type="password" id="adminPasswordGateInput" autocomplete="current-password" placeholder="Admin password" />
+            <div class="actions mt-6">
+                <button class="primary" type="submit">Unlock</button>
+            </div>
+            <div id="adminPasswordGateStatus" class="muted mt-6"></div>
+        </form>
+    </div>
+</div>
 
 </body>
 </html>

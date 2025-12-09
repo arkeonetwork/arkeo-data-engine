@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Arkeo Data Marketplace | Admin Area</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="images/favicon.ico">
+    <link rel="shortcut icon" href="images/favicon.ico">
+</head>
+<body>
+
+<div class="card header-card">
+    <div class="row-between header-top">
+        <div class="header-left">
+            <div class="header-brand-row">
+                <img src="images/arkeo-logo-200px_1.png" alt="Arkeo" class="header-logo">
+                <div class="header-brand">
+                    <span class="brand-main">Arkeo Data Marketplace</span>
+                    <span class="brand-sep">|</span>
+                    <span class="brand-sub">Provider Manager</span>
+                </div>
+            </div>
+            <h1>Admin Area</h1>
+            <div class="muted">Quick links, health checks, and an overview of the admin UI.</div>
+        </div>
+        <div class="header-right header-right-with-actions">
+            <div class="header-actions">
+                <a class="btn-ghost" href="index.html">Back to Dashboard</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="row-between align-center">
+        <div class="inline">
+            <h2 class="mt-0 mb-0">Admin Overview</h2>
+        </div>
+    </div>
+    <div class="grid-two">
+        <div class="panel stack">
+            <div>
+                <strong>Admin API</strong>
+                <div id="adminApiVersion" class="muted mt-6">(loading...)</div>
+            </div>
+            <div>
+                <strong>Admin API URL</strong>
+                <div id="adminApiUrl" class="muted mt-6"></div>
+            </div>
+            <div>
+                <strong>Admin UI URL</strong>
+                <div id="adminUiUrl" class="muted mt-6"></div>
+            </div>
+        </div>
+        <div class="panel stack">
+            <div>
+                <strong>Block Height</strong>
+                <div id="blockHeightDisplay" class="muted mt-6">(loading...)</div>
+            </div>
+            <div>
+                <strong>Provider Balance</strong>
+                <div id="balanceDisplay" class="muted mt-6">(loading...)</div>
+            </div>
+            <div>
+                <strong>Provider Pubkey</strong>
+                <div id="overviewPubkeyDisplay" class="muted mt-6">(loading...)</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="row-between align-center">
+        <div class="inline">
+            <h2 class="mt-0 mb-0">Provider Settings</h2>
+            <div class="hint">Values formerly stored in provider.env. Update and save here.</div>
+        </div>
+        <div class="actions">
+            <button class="primary" type="submit" form="providerSettingsForm">Save Settings</button>
+        </div>
+    </div>
+    <form id="providerSettingsForm" onsubmit="saveProviderSettings(event)">
+    <table>
+        <tr>
+            <td class="label">Key Name</td>
+            <td class="value"><input type="text" id="keyName" readonly /></td>
+        </tr>
+        <tr>
+            <td class="label">Keyring Backend <span class="muted" id="keyBackendLabel">(default)</span></td>
+            <td class="value"><div id="keyBackendValue" class="muted">(read-only)</div></td>
+        </tr>
+        <tr>
+            <td class="label">Chain ID</td>
+            <td class="value"><input type="text" id="chainId" /></td>
+        </tr>
+        <tr>
+            <td class="label">Arkeod Home <span class="muted" id="arkeodHomeLabel"></span></td>
+            <td class="value"><div id="arkeodHomeValue" class="muted">(read-only)</div></td>
+        </tr>
+        <tr>
+            <td class="label">Arkeod Node (RPC)</td>
+            <td class="value"><input type="text" id="arkeodNode" placeholder="tcp://provider1.innovationtheory.com:26657" /></td>
+        </tr>
+        <tr>
+            <td class="label">Arkeo REST API</td>
+            <td class="value"><input type="text" id="arkeodRest" placeholder="http://host:1317" /></td>
+        </tr>
+        <tr>
+            <td class="label">Sentinel Node</td>
+            <td class="value"><input type="text" id="sentinelNode" placeholder="http://host" /></td>
+        </tr>
+        <tr>
+            <td class="label">Sentinel Port</td>
+            <td class="value"><input type="text" id="sentinelPort" placeholder="3636" /></td>
+        </tr>
+        <tr>
+            <td class="label">Admin UI Port</td>
+            <td class="value"><input type="text" id="adminPort" placeholder="8080" autocomplete="on" /></td>
+        </tr>
+        <tr>
+            <td class="label">Admin API Port</td>
+            <td class="value"><input type="text" id="adminApiPort" placeholder="9999" autocomplete="on" /></td>
+        </tr>
+        <tr>
+            <td class="label">
+                Hotwallet Mnemonic
+                <div class="hint">Current mnemonic is auto-saved (settings + ~/.arkeo/*_mnemonic.txt). Paste a new one to delete and recreate the hotwallet.</div>
+            </td>
+            <td class="value"><textarea id="hotwalletMnemonic" rows="3"></textarea></td>
+        </tr>
+        <tr>
+            <td class="label">
+                Admin Password
+                <div class="hint">Leave blank to disable. When set, a password prompt is required on this page.</div>
+            </td>
+            <td class="value"><input type="password" id="adminPasswordInput" class="full" autocomplete="new-password" placeholder="(optional)" /></td>
+        </tr>
+        <tr>
+            <td class="label">Derived Pubkey</td>
+            <td class="value"><div id="providerPubkeyDisplay" class="muted">(loading...)</div></td>
+        </tr>
+    </table>
+    <div id="providerSettingsResult" class="muted" aria-live="polite"></div>
+    </form>
+</div>
+
+<div class="card footer-card">
+    <div class="footer-links">
+        <div class="footer-brand">
+            <img src="images/arkeo-logo-200px_1.png" alt="Arkeo" class="footer-logo">
+            <span class="footer-title">
+                <span class="brand-main">Arkeo Marketplace</span>
+                <span class="brand-sep">|</span>
+                <span class="brand-sub">Provider Manager</span>
+            </span>
+        </div>
+        <div class="footer-links-right">
+            <div><a href="https://arkeo.network/" target="_blank" rel="noopener">Arkeo Marketplace Website</a></div>
+            <div><a href="https://discord.gg/arkeo" target="_blank" rel="noopener">Arkeo Discord</a></div>
+        </div>
+    </div>
+</div>
+
+<div id="adminPasswordGate" class="overlay hidden">
+    <div class="overlay-card modal-card">
+        <h3>Admin Password Required</h3>
+        <p class="muted">Enter the admin password to continue.</p>
+        <form onsubmit="submitAdminPasswordGate(); return false;">
+            <input type="text" name="admin-username-filler" autocomplete="username" value="admin" class="hidden" aria-hidden="true" tabindex="-1" />
+            <input type="password" id="adminPasswordGateInput" autocomplete="current-password" placeholder="Admin password" />
+            <div class="actions mt-6">
+                <button class="primary" type="submit">Unlock</button>
+            </div>
+        </form>
+        <div id="adminPasswordGateStatus" class="muted mt-6"></div>
+    </div>
+</div>
+
+<script>
+    const DEFAULT_ADMIN_API_PORT = "9999";
+    const DEFAULT_ADMIN_UI_PORT = "8080";
+    let adminHost = (window.location && window.location.hostname) || "localhost";
+    let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+    let providerSettingsCache = {};
+    let adminPasswordEnabled = false;
+    let adminSessionAuthed = false;
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (url, options = {}) => realFetch(url, { credentials: "include", ...options });
+
+    function buildBaseUrl(host, port) {
+        const proto = (window.location && window.location.protocol === "https:") ? "https:" : "http:";
+        const cleaned = (host || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
+        return `${proto}//${cleaned}${port ? `:${port}` : ""}`;
+    }
+
+    function resolveApi(path) {
+        if (!path.startsWith("/")) path = `/${path}`;
+        return `${adminApiBase}${path}`;
+    }
+
+    function formatBalance(balanceObj) {
+        const coins =
+            (balanceObj && balanceObj.balance && balanceObj.balance.result && Array.isArray(balanceObj.balance.result) && balanceObj.balance.result) ||
+            (balanceObj && balanceObj.balance && balanceObj.balance.balances && Array.isArray(balanceObj.balance.balances) && balanceObj.balance.balances) ||
+            [];
+        if (!coins.length) return "0 uarkeo";
+        const fmtCoin = (c) => {
+            const amount = c.amount || c.Amount || "";
+            const denom = c.denom || c.Denom || "";
+            if (denom === "uarkeo") {
+                const num = parseInt(amount || "0", 10);
+                const val = num / 1e8;
+                return `${val.toLocaleString("en-US", { minimumFractionDigits: 8, maximumFractionDigits: 8 })} ARKEO`;
+            }
+            return `${amount}${denom}`;
+        };
+        return coins.map(fmtCoin).join(", ");
+    }
+
+    function formatBlockHeight(heightObj) {
+        const h =
+            (heightObj && heightObj.height) ||
+            (heightObj && heightObj.status && (heightObj.status.latest_block_height || (heightObj.status.SyncInfo && heightObj.status.SyncInfo.latest_block_height)));
+        if (!h) return "(unknown)";
+        const num = Number(h);
+        if (!Number.isFinite(num)) return String(h);
+        return num.toLocaleString("en-US");
+    }
+
+    function formatPubkeyShort(pk) {
+        if (!pk) return "";
+        const str = String(pk);
+        if (str.length <= 17) return str;
+        return `${str.slice(0, 9)}...${str.slice(-8)}`;
+    }
+
+    function setBadge() {
+        // badge removed
+        return;
+    }
+
+    async function fetchAdminPasswordStatus(showGate = true) {
+        try {
+            const res = await fetch(resolveApi("/api/session"), { cache: "no-store" });
+            const data = await res.json();
+            adminPasswordEnabled = !!(data && data.enabled);
+            adminSessionAuthed = !!(data && data.authed);
+        } catch (e) {
+            adminPasswordEnabled = false;
+            adminSessionAuthed = false;
+        }
+        const gate = document.getElementById("adminPasswordGate");
+        const gateAuthed = sessionStorage.getItem("adminAuthed") === "1" || adminSessionAuthed;
+        if (gate) {
+            if (showGate && adminPasswordEnabled && !gateAuthed) {
+                gate.classList.remove("hidden");
+            } else {
+                gate.classList.add("hidden");
+            }
+        }
+    }
+
+    async function submitAdminPasswordGate() {
+        const input = document.getElementById("adminPasswordGateInput");
+        const statusEl = document.getElementById("adminPasswordGateStatus");
+        const pwd = (input && input.value) || "";
+        if (statusEl) statusEl.textContent = "Verifying...";
+        try {
+            const res = await fetch(resolveApi("/api/login"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ password: pwd }),
+            });
+            const data = await res.json();
+            if (data && data.ok) {
+                sessionStorage.setItem("adminAuthed", "1");
+                adminSessionAuthed = true;
+                const gate = document.getElementById("adminPasswordGate");
+                if (gate) gate.classList.add("hidden");
+                if (statusEl) statusEl.textContent = "";
+            } else {
+                if (statusEl) statusEl.textContent = "Incorrect password.";
+            }
+        } catch (e) {
+            if (statusEl) statusEl.textContent = `Failed to verify: ${e}`;
+        }
+    }
+
+    async function loadAdminInfo() {
+        setBadge("warn", "Refreshing…");
+        const fetchNoStore = (url) => fetch(url, { cache: "no-store" });
+        const parseSafe = async (settled) => {
+            if (settled.status !== "fulfilled" || !settled.value) return { error: String(settled.reason || "request failed") };
+            try {
+                if (!settled.value.ok) {
+                    const text = await settled.value.text().catch(() => "");
+                    return { error: `${settled.value.status} ${settled.value.statusText || ""}`, body: text };
+                }
+                return await settled.value.json();
+            } catch (err) {
+                return { error: "invalid json", detail: String(err) };
+            }
+        };
+        try {
+            const [verRes, heightRes, balRes, keyRes] = await Promise.allSettled([
+                fetchNoStore(resolveApi("/api/version")),
+                fetchNoStore(resolveApi("/api/block-height")),
+                fetchNoStore(resolveApi("/api/balance")),
+                fetchNoStore(resolveApi("/api/key")),
+            ]);
+            const version = await parseSafe(verRes);
+            const height = await parseSafe(heightRes);
+            const balance = await parseSafe(balRes);
+            const key = await parseSafe(keyRes);
+
+            const apiVersionEl = document.getElementById("adminApiVersion");
+            if (apiVersionEl) apiVersionEl.textContent = version && !version.error ? version.arkeod_version || "(unknown)" : "Unavailable";
+
+            const apiUrlEl = document.getElementById("adminApiUrl");
+            if (apiUrlEl) apiUrlEl.textContent = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT) + "/api/version";
+
+            const uiUrlEl = document.getElementById("adminUiUrl");
+            if (uiUrlEl) uiUrlEl.textContent = buildBaseUrl(adminHost, DEFAULT_ADMIN_UI_PORT);
+
+            const heightEl = document.getElementById("blockHeightDisplay");
+            if (heightEl) heightEl.textContent = formatBlockHeight(height);
+
+            const balEl = document.getElementById("balanceDisplay");
+            if (balEl) balEl.textContent = formatBalance(balance);
+
+            const pubEl = document.getElementById("overviewPubkeyDisplay");
+            const bech32 = (key && key.pubkey && key.pubkey.bech32) || "";
+            if (pubEl) {
+                if (bech32) {
+                    pubEl.textContent = formatPubkeyShort(bech32);
+                } else if (!pubEl.textContent || pubEl.textContent === "(unavailable)") {
+                    pubEl.textContent = "(unavailable)";
+                }
+            }
+
+            const hasErrors = !!(version && version.error) || !!(height && height.error) || !!(balance && balance.error);
+            setBadge(hasErrors ? "warn" : "ok", hasErrors ? "Partial data" : "Up to date");
+        } catch (e) {
+            setBadge("err", "Failed to refresh");
+        }
+    }
+
+    function setProviderInput(id, val) {
+        const el = document.getElementById(id);
+        if (el) el.value = val || "";
+    }
+
+    function setStatusMessage(text, isError = false) {
+        const resultEl = document.getElementById("providerSettingsResult");
+        if (!resultEl) return;
+        resultEl.textContent = text || "";
+        resultEl.classList.toggle("status-error", isError);
+        resultEl.classList.toggle("status-success", !isError && !!text);
+        resultEl.classList.toggle("error", isError);
+    }
+
+    async function loadProviderSettings(showStatus = true) {
+        const resultEl = document.getElementById("providerSettingsResult");
+        if (showStatus && resultEl) {
+            setStatusMessage("Loading provider settings...", false);
+        }
+        try {
+            const res = await fetch(resolveApi("/api/provider-settings"), { cache: "no-store" });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data && data.error ? data.error : res.statusText);
+            }
+            providerSettingsCache = data.settings || {};
+            setProviderInput("keyName", providerSettingsCache.KEY_NAME);
+            const backendLabel = document.getElementById("keyBackendLabel");
+            const backendVal = document.getElementById("keyBackendValue");
+            const backendText = providerSettingsCache.KEY_KEYRING_BACKEND || "(default)";
+            if (backendLabel) backendLabel.textContent = backendText;
+            if (backendVal) backendVal.textContent = backendText;
+            setProviderInput("chainId", providerSettingsCache.CHAIN_ID);
+            const homeLabel = document.getElementById("arkeodHomeLabel");
+            const homeVal = document.getElementById("arkeodHomeValue");
+            const homeText = providerSettingsCache.ARKEOD_HOME || "";
+            if (homeLabel) homeLabel.textContent = homeText ? `(${homeText})` : "";
+            if (homeVal) homeVal.textContent = homeText || "(read-only)";
+            setProviderInput("arkeodNode", providerSettingsCache.ARKEOD_NODE || providerSettingsCache.EXTERNAL_ARKEOD_NODE);
+            setProviderInput("arkeodRest", providerSettingsCache.ARKEO_REST_API_PORT || providerSettingsCache.PROVIDER_HUB_URI);
+            setProviderInput("sentinelNode", providerSettingsCache.SENTINEL_NODE);
+            setProviderInput("sentinelPort", providerSettingsCache.SENTINEL_PORT);
+            setProviderInput("adminPort", providerSettingsCache.ADMIN_PORT);
+            setProviderInput("adminApiPort", providerSettingsCache.ADMIN_API_PORT);
+            setProviderInput("hotwalletMnemonic", providerSettingsCache.KEY_MNEMONIC);
+            const adminPwdInput = document.getElementById("adminPasswordInput");
+            if (adminPwdInput) adminPwdInput.value = data.admin_password || "";
+            const pubEl = document.getElementById("providerPubkeyDisplay");
+            const pubkey = data.pubkey && data.pubkey.bech32 ? data.pubkey.bech32 : "";
+            if (pubEl) pubEl.textContent = pubkey ? pubkey : "(unavailable)";
+            const overviewEl = document.getElementById("overviewPubkeyDisplay");
+            if (overviewEl) overviewEl.textContent = pubkey ? formatPubkeyShort(pubkey) : "(unavailable)";
+            if (resultEl) {
+                const src = data.mnemonic_source ? `Mnemonic source: ${data.mnemonic_source}.` : "";
+                resultEl.textContent = `Loaded provider settings${data.provider_settings_path ? ` from ${data.provider_settings_path}` : ""}. ${src}`;
+            }
+        } catch (e) {
+            if (resultEl) resultEl.textContent = `Failed to load provider settings: ${e}`;
+        }
+    }
+
+    async function saveProviderSettings(event) {
+        if (event && event.preventDefault) event.preventDefault();
+        const payload = {
+            settings: {
+                KEY_NAME: document.getElementById("keyName")?.value || "",
+                KEY_KEYRING_BACKEND: providerSettingsCache.KEY_KEYRING_BACKEND || "",
+                CHAIN_ID: document.getElementById("chainId")?.value || "",
+                ARKEOD_HOME: providerSettingsCache.ARKEOD_HOME || "",
+                ARKEOD_NODE: document.getElementById("arkeodNode")?.value || "",
+                EXTERNAL_ARKEOD_NODE: document.getElementById("arkeodNode")?.value || "",
+                ARKEO_REST_API_PORT: document.getElementById("arkeodRest")?.value || "",
+                PROVIDER_HUB_URI: document.getElementById("arkeodRest")?.value || "",
+                SENTINEL_NODE: document.getElementById("sentinelNode")?.value || "",
+                SENTINEL_PORT: document.getElementById("sentinelPort")?.value || "",
+                ADMIN_PORT: document.getElementById("adminPort")?.value || "",
+                ADMIN_API_PORT: document.getElementById("adminApiPort")?.value || "",
+                KEY_MNEMONIC: document.getElementById("hotwalletMnemonic")?.value || "",
+            },
+        };
+        const adminPasswordVal = document.getElementById("adminPasswordInput")?.value || "";
+        const resultEl = document.getElementById("providerSettingsResult");
+        let finalMessage = "Saving settings...";
+        let isError = false;
+        setStatusMessage(finalMessage, false);
+        try {
+            const res = await fetch(resolveApi("/api/provider-settings"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data && data.error ? data.error : res.statusText);
+            }
+            providerSettingsCache = data.settings || providerSettingsCache;
+            if (data.pubkey && data.pubkey.bech32) {
+                const pubEl = document.getElementById("providerPubkeyDisplay");
+                if (pubEl) pubEl.textContent = data.pubkey.bech32;
+                const overviewEl = document.getElementById("overviewPubkeyDisplay");
+                if (overviewEl) overviewEl.textContent = formatPubkeyShort(data.pubkey.bech32);
+            } else {
+                const pubEl = document.getElementById("providerPubkeyDisplay");
+                if (pubEl && (!pubEl.textContent || pubEl.textContent === "(unavailable)")) {
+                    pubEl.textContent = "(unavailable)";
+                }
+                const overviewEl = document.getElementById("overviewPubkeyDisplay");
+                if (overviewEl && (!overviewEl.textContent || overviewEl.textContent === "(unavailable)")) {
+                    overviewEl.textContent = "(unavailable)";
+                }
+            }
+            // Save admin password (blank disables)
+            try {
+                await fetch(resolveApi("/api/admin-password"), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ password: adminPasswordVal }),
+                });
+                sessionStorage.setItem("adminAuthed", adminPasswordVal ? "1" : "0");
+                adminPasswordEnabled = !!adminPasswordVal;
+            } catch (e) {
+                // ignore password save errors to avoid blocking settings save
+            }
+            if (resultEl) {
+                const rotated = data.mnemonic_rotated ? "Hotwallet re-imported with new mnemonic. " : "";
+                finalMessage = `${rotated}Saved provider settings${data.provider_settings_path ? ` to ${data.provider_settings_path}` : ""}.`;
+            }
+            await loadAdminInfo();
+            await loadProviderSettings(false);
+            await fetchAdminPasswordStatus(false);
+        } catch (e) {
+            finalMessage = `Failed to save provider settings: ${e}`;
+            isError = true;
+        } finally {
+            setStatusMessage(finalMessage, isError);
+        }
+    }
+
+    window.addEventListener("load", () => {
+        fetchAdminPasswordStatus(true);
+        loadAdminInfo();
+        loadProviderSettings();
+        setInterval(loadAdminInfo, 5000);
+    });
+</script>
+
+</body>
+</html>

@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import time
+import secrets
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -38,9 +39,21 @@ def _build_sentinel_uri() -> str:
     host = os.getenv("SENTINEL_BIND_HOST") or "127.0.0.1"
     return f"http://{host}:{port}/metadata.json"
 
-ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeo"))
-KEY_NAME = os.getenv("KEY_NAME", "provider")
-KEYRING = os.getenv("KEY_KEYRING_BACKEND", "test")
+DEFAULT_KEY_NAME = "provider"
+DEFAULT_KEYRING = "test"
+DEFAULT_CHAIN_ID = "arkeo-main-v2"
+DEFAULT_ARKEOD_HOME = "~/.arkeo"
+DEFAULT_ARKEOD_NODE = "tcp://host.docker.internal:26657"
+DEFAULT_ARKEO_REST = "http://host.docker.internal:1317"
+DEFAULT_SENTINEL_NODE = "http://host.docker.internal"
+DEFAULT_SENTINEL_PORT = "3636"
+DEFAULT_ADMIN_PORT = "8080"
+DEFAULT_ADMIN_API_PORT = "9999"
+DEFAULT_MNEMONIC = ""
+
+ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", DEFAULT_ARKEOD_HOME))
+KEY_NAME = os.getenv("KEY_NAME", DEFAULT_KEY_NAME)
+KEYRING = os.getenv("KEY_KEYRING_BACKEND", DEFAULT_KEYRING)
 def _strip_quotes(val: str | None) -> str:
     if not val:
         return ""
@@ -52,9 +65,9 @@ def _strip_quotes(val: str | None) -> str:
 ARKEOD_NODE = _strip_quotes(
     os.getenv("ARKEOD_NODE")
     or os.getenv("EXTERNAL_ARKEOD_NODE")
-    or "tcp://provider1.innovationtheory.com:26657"
+    or DEFAULT_ARKEOD_NODE
 )
-CHAIN_ID = _strip_quotes(os.getenv("CHAIN_ID") or os.getenv("ARKEOD_CHAIN_ID") or "")
+CHAIN_ID = _strip_quotes(os.getenv("CHAIN_ID") or os.getenv("ARKEOD_CHAIN_ID") or DEFAULT_CHAIN_ID)
 NODE_ARGS = ["--node", ARKEOD_NODE] if ARKEOD_NODE else []
 CHAIN_ARGS = ["--chain-id", CHAIN_ID] if CHAIN_ID else []
 # Use the packaged supervisord config unless overridden
@@ -70,6 +83,18 @@ SENTINEL_CONFIG_PATH = os.getenv("SENTINEL_CONFIG_PATH", "/app/config/sentinel.y
 SENTINEL_ENV_PATH = os.getenv("SENTINEL_ENV_PATH", "/app/config/sentinel.env")
 PROVIDER_ENV_PATH = os.getenv("PROVIDER_ENV_PATH", "/app/provider.env")
 CACHE_DIR = os.getenv("CACHE_DIR", "/app/cache")
+PROVIDER_SETTINGS_PATH = os.getenv("PROVIDER_SETTINGS_PATH") or (
+    os.path.join(CACHE_DIR or "/app/cache", "provider-settings.json")
+)
+ADMIN_PASSWORD_PATH = os.getenv("ADMIN_PASSWORD_PATH") or (
+    os.path.join(CACHE_DIR or "/app/cache", "admin_password.txt")
+)
+ADMIN_SESSION_SECRET = os.getenv("ADMIN_SESSION_SECRET") or secrets.token_hex(16)
+ADMIN_SESSION_NAME = os.getenv("ADMIN_SESSION_NAME") or "admin_session"
+# UI origin used for CORS (allow credentials)
+ADMIN_UI_ORIGIN = os.getenv("ADMIN_UI_ORIGIN") or "http://localhost:8080"
+# token -> expiry_ts
+ADMIN_SESSIONS: dict[str, float] = {}
 CLAIMS_HEARTBEAT_PATH = os.path.join(CACHE_DIR, "claims-heartbeat.json") if CACHE_DIR else "claims-heartbeat.json"
 ENV_EXPORT_KEYS = [
     "PROVIDER_NAME",
@@ -183,6 +208,50 @@ def run_list(cmd: list[str]) -> tuple[int, str]:
     except subprocess.CalledProcessError as e:
         return e.returncode, e.output.decode("utf-8")
 
+
+def run_with_input(cmd: list[str], input_text: str) -> tuple[int, str]:
+    """Run a command with stdin content."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=input_text.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        return proc.returncode, proc.stdout.decode("utf-8")
+    except Exception as e:
+        return 1, str(e)
+
+
+def _auth_exempt(path: str) -> bool:
+    if not path.startswith("/api/"):
+        return True
+    exempt = {
+        "/api/admin-password",
+        "/api/admin-password/check",
+        "/api/session",
+        "/api/login",
+        "/api/ping",
+    }
+    return path in exempt
+
+
+@app.before_request
+def _require_auth():
+    """Require session auth when admin password is set."""
+    if request.method == "OPTIONS":
+        resp = app.make_response(("", 204, _cors_headers()))
+        return resp
+    if _auth_exempt(request.path):
+        return
+    if not _is_auth_required():
+        return
+    token = request.cookies.get(ADMIN_SESSION_NAME)
+    if _validate_session(token):
+        return
+    return jsonify({"error": "unauthorized"}), 401
+
 def ensure_cache_dir():
     """Ensure CACHE_DIR exists."""
     if CACHE_DIR and not os.path.isdir(CACHE_DIR):
@@ -239,9 +308,9 @@ def read_cache_json(name: str):
 
 @app.after_request
 def add_cors(resp):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Cache-Control"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    headers = _cors_headers()
+    for k, v in headers.items():
+        resp.headers[k] = v
     return resp
 
 
@@ -1210,6 +1279,346 @@ def _expand_tilde(val: str) -> str:
     return val
 
 
+def _load_provider_settings_file() -> dict:
+    """Load persisted provider settings JSON (replacement for provider.env)."""
+    if not PROVIDER_SETTINGS_PATH or not os.path.isfile(PROVIDER_SETTINGS_PATH):
+        return {}
+    try:
+        with open(PROVIDER_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_provider_settings_file(data: dict) -> None:
+    """Persist provider settings JSON."""
+    if not PROVIDER_SETTINGS_PATH or not isinstance(data, dict):
+        return
+    try:
+        os.makedirs(os.path.dirname(PROVIDER_SETTINGS_PATH), exist_ok=True)
+        with open(PROVIDER_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass
+
+
+def _load_admin_password() -> str:
+    """Return stored admin password (plain) or empty string."""
+    if not ADMIN_PASSWORD_PATH or not os.path.isfile(ADMIN_PASSWORD_PATH):
+        return ""
+    try:
+        with open(ADMIN_PASSWORD_PATH, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _write_admin_password(password: str) -> bool:
+    """Persist admin password; returns True on success."""
+    if not ADMIN_PASSWORD_PATH:
+        return False
+    try:
+        os.makedirs(os.path.dirname(ADMIN_PASSWORD_PATH), exist_ok=True)
+        with open(ADMIN_PASSWORD_PATH, "w", encoding="utf-8") as f:
+            f.write(password.strip())
+        return True
+    except OSError:
+        return False
+
+
+def _remove_admin_password() -> bool:
+    """Remove stored admin password; returns True on success or not present."""
+    if not ADMIN_PASSWORD_PATH:
+        return False
+    try:
+        if os.path.isfile(ADMIN_PASSWORD_PATH):
+            os.remove(ADMIN_PASSWORD_PATH)
+        return True
+    except OSError:
+        return False
+
+
+def _is_auth_required() -> bool:
+    return bool(_load_admin_password())
+
+
+def _purge_sessions() -> None:
+    now = time.time()
+    expired = [tok for tok, exp in ADMIN_SESSIONS.items() if exp <= now]
+    for tok in expired:
+        ADMIN_SESSIONS.pop(tok, None)
+
+
+def _generate_session_token(ttl_seconds: int = 3600) -> str:
+    _purge_sessions()
+    token = secrets.token_hex(32)
+    ADMIN_SESSIONS[token] = time.time() + ttl_seconds
+    return token
+
+
+def _validate_session(token: str | None) -> bool:
+    if not token:
+        return False
+    _purge_sessions()
+    exp = ADMIN_SESSIONS.get(token)
+    if not exp:
+        return False
+    if exp <= time.time():
+        ADMIN_SESSIONS.pop(token, None)
+        return False
+    return True
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(origin)
+    except Exception:
+        return False
+    origin_host = parsed.netloc or parsed.path
+    if not origin_host:
+        return False
+    try:
+        ui_parsed = urllib.parse.urlparse(ADMIN_UI_ORIGIN)
+        ui_host = ui_parsed.netloc or ui_parsed.path
+        if origin_host == ui_host:
+            return True
+    except Exception:
+        pass
+    # Allow same host as API
+    api_host = request.host.split(":")[0] if request.host else ""
+    if api_host and origin_host.startswith(api_host):
+        return True
+    return False
+
+
+def _cors_headers():
+    origin = request.headers.get("Origin")
+    headers = {}
+    if _origin_allowed(origin):
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Vary"] = "Origin"
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Cache-Control"
+        headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        headers["Access-Control-Max-Age"] = "3600"
+    return headers
+
+
+def _default_provider_settings() -> dict:
+    """Return defaults from env + sane fallbacks."""
+    defaults = {
+        "KEY_NAME": os.getenv("KEY_NAME", DEFAULT_KEY_NAME),
+        "KEY_KEYRING_BACKEND": os.getenv("KEY_KEYRING_BACKEND", DEFAULT_KEYRING),
+        "KEY_MNEMONIC": os.getenv("KEY_MNEMONIC", DEFAULT_MNEMONIC),
+        "CHAIN_ID": _strip_quotes(os.getenv("CHAIN_ID") or os.getenv("ARKEOD_CHAIN_ID") or DEFAULT_CHAIN_ID),
+        "ARKEOD_HOME": _expand_tilde(os.getenv("ARKEOD_HOME") or DEFAULT_ARKEOD_HOME),
+        "ARKEOD_NODE": _strip_quotes(os.getenv("ARKEOD_NODE") or os.getenv("EXTERNAL_ARKEOD_NODE") or DEFAULT_ARKEOD_NODE),
+        "EXTERNAL_ARKEOD_NODE": _strip_quotes(os.getenv("EXTERNAL_ARKEOD_NODE") or os.getenv("ARKEOD_NODE") or DEFAULT_ARKEOD_NODE),
+        "ARKEO_REST_API_PORT": os.getenv("ARKEO_REST_API_PORT") or os.getenv("PROVIDER_HUB_URI") or DEFAULT_ARKEO_REST,
+        "PROVIDER_HUB_URI": os.getenv("PROVIDER_HUB_URI") or os.getenv("ARKEO_REST_API_PORT") or DEFAULT_ARKEO_REST,
+        "SENTINEL_NODE": os.getenv("SENTINEL_NODE") or DEFAULT_SENTINEL_NODE,
+        "SENTINEL_PORT": os.getenv("SENTINEL_PORT") or DEFAULT_SENTINEL_PORT,
+        "ADMIN_PORT": os.getenv("ADMIN_PORT") or DEFAULT_ADMIN_PORT,
+        "ADMIN_API_PORT": os.getenv("ADMIN_API_PORT") or DEFAULT_ADMIN_API_PORT,
+        "EVENT_STREAM_HOST": os.getenv("EVENT_STREAM_HOST") or "",
+    }
+    return defaults
+
+
+def _merge_provider_settings(overrides: dict | None = None) -> dict:
+    """Merge defaults, persisted file, and optional overrides."""
+    merged = _default_provider_settings()
+    saved = _load_provider_settings_file()
+    if isinstance(saved, dict):
+        merged.update(saved)
+    if overrides and isinstance(overrides, dict):
+        merged.update(overrides)
+    merged["ARKEOD_HOME"] = _expand_tilde(merged.get("ARKEOD_HOME") or ARKEOD_HOME)
+    if not merged.get("ARKEOD_NODE"):
+        merged["ARKEOD_NODE"] = merged.get("EXTERNAL_ARKEOD_NODE") or ARKEOD_NODE
+    if not merged.get("EXTERNAL_ARKEOD_NODE"):
+        merged["EXTERNAL_ARKEOD_NODE"] = merged.get("ARKEOD_NODE") or ARKEOD_NODE
+    return merged
+
+
+def _apply_provider_settings(settings: dict) -> None:
+    """Apply provider settings to globals and os.environ for runtime use."""
+    global KEY_NAME, KEYRING, ARKEOD_HOME, ARKEOD_NODE, CHAIN_ID, NODE_ARGS, CHAIN_ARGS
+    if not isinstance(settings, dict):
+        return
+    KEY_NAME = settings.get("KEY_NAME", KEY_NAME)
+    KEYRING = settings.get("KEY_KEYRING_BACKEND", KEYRING)
+    ARKEOD_HOME = _expand_tilde(settings.get("ARKEOD_HOME") or ARKEOD_HOME)
+    node_val = settings.get("ARKEOD_NODE") or settings.get("EXTERNAL_ARKEOD_NODE") or ARKEOD_NODE
+    ARKEOD_NODE = _strip_quotes(node_val)
+    CHAIN_ID = _strip_quotes(settings.get("CHAIN_ID") or CHAIN_ID)
+    NODE_ARGS = ["--node", ARKEOD_NODE] if ARKEOD_NODE else []
+    CHAIN_ARGS = ["--chain-id", CHAIN_ID] if CHAIN_ID else []
+
+    env_overrides = {
+        "KEY_NAME": KEY_NAME,
+        "KEY_KEYRING_BACKEND": KEYRING,
+        "CHAIN_ID": CHAIN_ID,
+        "ARKEOD_HOME": ARKEOD_HOME,
+        "ARKEOD_NODE": ARKEOD_NODE,
+        "EXTERNAL_ARKEOD_NODE": settings.get("EXTERNAL_ARKEOD_NODE", ""),
+        "ARKEO_REST_API_PORT": settings.get("ARKEO_REST_API_PORT", ""),
+        "PROVIDER_HUB_URI": settings.get("PROVIDER_HUB_URI", ""),
+        "SENTINEL_NODE": settings.get("SENTINEL_NODE", ""),
+        "SENTINEL_PORT": settings.get("SENTINEL_PORT", ""),
+        "ADMIN_PORT": settings.get("ADMIN_PORT", ""),
+        "ADMIN_API_PORT": settings.get("ADMIN_API_PORT", ""),
+        "EVENT_STREAM_HOST": settings.get("EVENT_STREAM_HOST", ""),
+        "KEY_MNEMONIC": settings.get("KEY_MNEMONIC", ""),
+    }
+    for k, v in env_overrides.items():
+        if v is None:
+            continue
+        os.environ[k] = str(v)
+
+
+# Apply persisted provider settings at import time (if present)
+_apply_provider_settings(_merge_provider_settings())
+
+
+def _mnemonic_file_path(settings: dict | None = None) -> str:
+    cfg = settings or _merge_provider_settings()
+    home = _expand_tilde(cfg.get("ARKEOD_HOME") or ARKEOD_HOME)
+    key_name = cfg.get("KEY_NAME") or KEY_NAME
+    return os.path.join(home, f"{key_name}_mnemonic.txt")
+
+
+def _extract_mnemonic(text: str) -> str:
+    """Best-effort extraction of a 12-24 word mnemonic from text."""
+    if not text:
+        return ""
+    text_lower = text.lower()
+    candidates: list[tuple[int, int, str]] = []
+    for idx, line in enumerate(text_lower.splitlines()):
+        words = [w for w in line.strip().split() if w.isalpha()]
+        if 12 <= len(words) <= 24:
+            candidates.append((len(words), idx, " ".join(words)))
+    for match_idx, m in enumerate(re.finditer(r"([a-z]+(?: [a-z]+){11,23})", text_lower)):
+        phrase = m.group(1)
+        word_count = len(phrase.split())
+        candidates.append((word_count, 10000 + match_idx, phrase))
+    if not candidates:
+        return ""
+    # Prefer highest word count; if tie, prefer later occurrence
+    candidates.sort(key=lambda t: (t[0], t[1]))
+    return candidates[-1][2]
+
+
+def _read_hotwallet_mnemonic(settings: dict | None = None) -> tuple[str, str]:
+    """Return mnemonic and source (settings/env/file/none)."""
+    cfg = _merge_provider_settings(settings or {})
+    mnemonic = (cfg.get("KEY_MNEMONIC") or os.getenv("KEY_MNEMONIC") or "").strip()
+    if mnemonic:
+        return mnemonic, "settings"
+    path = _mnemonic_file_path(cfg)
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            mnemonic = _extract_mnemonic(text)
+            if mnemonic:
+                return mnemonic, "file"
+        except OSError:
+            pass
+    return "", "none"
+
+
+def _write_hotwallet_mnemonic(settings: dict, mnemonic: str) -> None:
+    """Write mnemonic to the default file for later retrieval."""
+    path = _mnemonic_file_path(settings)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(mnemonic.strip() + "\n")
+    except OSError:
+        pass
+
+
+def _delete_hotwallet(key_name: str, keyring_backend: str, home: str) -> tuple[int, str]:
+    """Delete the existing key if present."""
+    cmd = [
+        "arkeod",
+        "--home",
+        home,
+        "--keyring-backend",
+        keyring_backend,
+        "keys",
+        "delete",
+        key_name,
+        "--force",
+        "--yes",
+    ]
+    return run_list(cmd)
+
+
+def _import_hotwallet_from_mnemonic(
+    mnemonic: str, key_name: str, keyring_backend: str, home: str
+) -> tuple[int, str]:
+    """Import (recover) a hotwallet from mnemonic."""
+    cmd = [
+        "arkeod",
+        "--home",
+        home,
+        "--keyring-backend",
+        keyring_backend,
+        "keys",
+        "add",
+        key_name,
+        "--recover",
+    ]
+    return run_with_input(cmd, mnemonic.strip() + "\n")
+
+
+def _create_hotwallet(
+    key_name: str, keyring_backend: str, home: str
+) -> tuple[int, str, str]:
+    """Create a new hotwallet and return (exit_code, output, mnemonic)."""
+    # Remove existing key first to avoid conflicts
+    _delete_hotwallet(key_name, keyring_backend, home)
+    cmd = [
+        "arkeod",
+        "--home",
+        home,
+        "--keyring-backend",
+        keyring_backend,
+        "keys",
+        "add",
+        key_name,
+    ]
+    code, out = run_list(cmd)
+    mnemonic = _extract_mnemonic(out)
+    return code, out, mnemonic
+
+
+def _sync_sentinel_pubkey(bech32_pubkey: str) -> bool:
+    """Update sentinel config provider pubkey to match hotwallet."""
+    if not bech32_pubkey:
+        return False
+    parsed, raw = _load_sentinel_config()
+    if parsed is None or not isinstance(parsed, dict):
+        return False
+    provider = parsed.get("provider")
+    if provider is None or not isinstance(provider, dict):
+        provider = {}
+        parsed["provider"] = provider
+    provider["pubkey"] = bech32_pubkey
+    try:
+        with open(SENTINEL_CONFIG_PATH, "w", encoding="utf-8") as f:
+            yaml.safe_dump(parsed, f, sort_keys=False)
+        return True
+    except OSError:
+        return False
+
+
 def _load_export_bundle() -> dict | None:
     """Load cached provider export if present."""
     path = PROVIDER_EXPORT_PATH
@@ -1237,6 +1646,7 @@ def _write_export_bundle(
     if env_file is None:
         env_file = _load_env_file(SENTINEL_ENV_PATH)
     provider_env_file = _load_env_file(PROVIDER_ENV_PATH)
+    provider_settings = _load_provider_settings_file()
     bundle = {
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "sentinel_env_path": SENTINEL_ENV_PATH,
@@ -1247,6 +1657,8 @@ def _write_export_bundle(
         "env_file": env_file,
         "provider_env_file": provider_env_file,
         "provider_env_path": PROVIDER_ENV_PATH,
+        "provider_settings": provider_settings,
+        "provider_settings_path": PROVIDER_SETTINGS_PATH,
     }
     if provider_form:
         bundle["provider_form"] = provider_form
@@ -1610,14 +2022,222 @@ def sentinel_config():
     )
 
 
+@app.get("/api/provider-settings")
+def provider_settings_get():
+    """Return provider settings (replacement for provider.env) plus mnemonic if available."""
+    settings = _merge_provider_settings()
+    mnemonic, mnemonic_source = _read_hotwallet_mnemonic(settings)
+    generated = False
+    if mnemonic:
+        settings["KEY_MNEMONIC"] = mnemonic
+    else:
+        # No mnemonic available; create a new hotwallet
+        code, out, gen_mnemonic = _create_hotwallet(
+            settings.get("KEY_NAME") or KEY_NAME,
+            settings.get("KEY_KEYRING_BACKEND") or KEYRING,
+            settings.get("ARKEOD_HOME") or ARKEOD_HOME,
+        )
+        if code != 0 or not gen_mnemonic:
+            return jsonify({"error": "failed to create hotwallet", "detail": out}), 500
+        settings["KEY_MNEMONIC"] = gen_mnemonic
+        _write_hotwallet_mnemonic(settings, gen_mnemonic)
+        _apply_provider_settings(settings)
+        _write_provider_settings_file(settings)
+        mnemonic = gen_mnemonic
+        mnemonic_source = "generated"
+        generated = True
+    raw_pk, bech32_pk, pub_err = derive_pubkeys(
+        settings.get("KEY_NAME") or KEY_NAME, settings.get("KEY_KEYRING_BACKEND") or KEYRING
+    )
+    return jsonify(
+        {
+            "settings": settings,
+            "provider_settings_path": PROVIDER_SETTINGS_PATH,
+            "mnemonic_source": mnemonic_source,
+            "mnemonic_found": bool(mnemonic),
+            "mnemonic_generated": generated,
+            "pubkey": {"raw": raw_pk, "bech32": bech32_pk, "error": pub_err},
+            "admin_password": _load_admin_password(),
+        }
+    )
+
+
+@app.post("/api/provider-settings")
+def provider_settings_save():
+    """Persist provider settings and optionally rotate hotwallet mnemonic."""
+    payload = request.get_json(force=True, silent=True) or {}
+    incoming = payload.get("settings") if isinstance(payload, dict) else None
+    data = incoming if isinstance(incoming, dict) else payload
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid payload"}), 400
+
+    merged = _merge_provider_settings(data)
+    new_mnemonic = (data.get("KEY_MNEMONIC") or data.get("mnemonic") or "").strip()
+    current_mnemonic, mnemonic_source = _read_hotwallet_mnemonic(merged)
+    rotate = bool(new_mnemonic)
+    delete_result: tuple[int, str] | None = None
+    import_result: tuple[int, str] | None = None
+    generated_result: tuple[int, str, str] | None = None
+
+    if rotate:
+        delete_result = _delete_hotwallet(
+            merged.get("KEY_NAME") or KEY_NAME,
+            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
+            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
+        )
+        delete_code, delete_out = delete_result
+        if delete_code not in (0, 1) and "not found" not in delete_out.lower():
+            return jsonify({"error": "failed to delete existing hotwallet", "detail": delete_out}), 500
+
+        import_result = _import_hotwallet_from_mnemonic(
+            new_mnemonic,
+            merged.get("KEY_NAME") or KEY_NAME,
+            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
+            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
+        )
+        import_code, import_out = import_result
+        if import_code != 0:
+            return jsonify({"error": "failed to import mnemonic", "detail": import_out}), 500
+        merged["KEY_MNEMONIC"] = new_mnemonic
+        mnemonic_source = "uploaded"
+        _write_hotwallet_mnemonic(merged, new_mnemonic)
+    elif current_mnemonic:
+        merged["KEY_MNEMONIC"] = current_mnemonic
+    else:
+        # No mnemonic available; generate a new hotwallet
+        delete_result = _delete_hotwallet(
+            merged.get("KEY_NAME") or KEY_NAME,
+            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
+            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
+        )
+        gen_code, gen_out, gen_mnemonic = _create_hotwallet(
+            merged.get("KEY_NAME") or KEY_NAME,
+            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
+            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
+        )
+        generated_result = (gen_code, gen_out, gen_mnemonic)
+        if gen_code != 0 or not gen_mnemonic:
+            return jsonify({"error": "failed to generate new mnemonic", "detail": gen_out}), 500
+        merged["KEY_MNEMONIC"] = gen_mnemonic
+        mnemonic_source = "generated"
+        rotate = True
+        _write_hotwallet_mnemonic(merged, gen_mnemonic)
+
+    _apply_provider_settings(merged)
+    _write_provider_settings_file(merged)
+
+    raw_pk, bech32_pk, pub_err = derive_pubkeys(
+        merged.get("KEY_NAME") or KEY_NAME, merged.get("KEY_KEYRING_BACKEND") or KEYRING
+    )
+    sentinel_updated = _sync_sentinel_pubkey(bech32_pk) if bech32_pk else False
+
+    return jsonify(
+        {
+            "status": "saved",
+            "provider_settings_path": PROVIDER_SETTINGS_PATH,
+            "mnemonic_rotated": rotate,
+            "mnemonic_source": mnemonic_source,
+            "pubkey": {"raw": raw_pk, "bech32": bech32_pk, "error": pub_err},
+            "sentinel_pubkey_updated": sentinel_updated,
+            "delete_result": delete_result,
+            "import_result": import_result,
+            "generated_result": generated_result,
+            "settings": merged,
+        }
+    )
+
+
+@app.get("/api/admin-password")
+def admin_password_get():
+    """Return whether an admin password is set and the current value (for local UI use)."""
+    pwd = _load_admin_password()
+    return jsonify({"enabled": bool(pwd), "path": ADMIN_PASSWORD_PATH, "password": pwd})
+
+
+@app.post("/api/admin-password")
+def admin_password_set():
+    """Set or clear admin password (empty disables)."""
+    payload = request.get_json(force=True, silent=True) or {}
+    password = (payload.get("password") or "").strip() if isinstance(payload, dict) else ""
+    if _is_auth_required():
+        # If a password is set, require valid session to change it
+        token = request.cookies.get(ADMIN_SESSION_NAME)
+        if not _validate_session(token):
+            return jsonify({"error": "unauthorized"}), 401
+    if not password:
+        ok = _remove_admin_password()
+        ADMIN_SESSIONS.clear()
+        return jsonify({"status": "disabled", "enabled": False, "ok": ok, "path": ADMIN_PASSWORD_PATH})
+    ok = _write_admin_password(password)
+    if not ok:
+        return jsonify({"error": "failed to write admin password", "path": ADMIN_PASSWORD_PATH}), 500
+    return jsonify({"status": "saved", "enabled": True, "ok": True, "path": ADMIN_PASSWORD_PATH})
+
+
+@app.post("/api/admin-password/check")
+def admin_password_check():
+    """Validate submitted admin password."""
+    payload = request.get_json(force=True, silent=True) or {}
+    submitted = (payload.get("password") or "").strip() if isinstance(payload, dict) else ""
+    stored = _load_admin_password()
+    if not stored:
+        return jsonify({"ok": True, "enabled": False})
+    ok = stored == submitted
+    return jsonify({"ok": ok, "enabled": True})
+
+
+@app.post("/api/login")
+def admin_login():
+    """Login and set session cookie if password is correct."""
+    payload = request.get_json(force=True, silent=True) or {}
+    submitted = (payload.get("password") or "").strip() if isinstance(payload, dict) else ""
+    stored = _load_admin_password()
+    if not stored:
+        # If no password set, treat as open and do not set a session
+        resp = jsonify({"ok": True, "enabled": False})
+        return resp
+    if submitted != stored:
+        return jsonify({"ok": False, "enabled": True, "error": "invalid_password"}), 401
+    token = _generate_session_token()
+    resp = jsonify({"ok": True, "enabled": True})
+    resp.set_cookie(
+        ADMIN_SESSION_NAME,
+        token,
+        httponly=True,
+        secure=False,
+        samesite="Lax",
+        max_age=3600,
+        path="/",
+    )
+    return resp
+
+
+@app.post("/api/logout")
+def admin_logout():
+    token = request.cookies.get(ADMIN_SESSION_NAME)
+    if token:
+        ADMIN_SESSIONS.pop(token, None)
+    resp = jsonify({"ok": True})
+    resp.set_cookie(ADMIN_SESSION_NAME, "", expires=0, path="/")
+    return resp
+
+
+@app.get("/api/session")
+def admin_session_status():
+    """Return whether auth is enabled and whether current session is valid."""
+    enabled = _is_auth_required()
+    authed = _validate_session(request.cookies.get(ADMIN_SESSION_NAME)) if enabled else True
+    return jsonify({"enabled": enabled, "authed": authed})
+
+
 @app.get("/api/endpoint-checks")
 def endpoint_checks():
     """Probe key endpoints from inside the container and report reachability."""
     env_file = _load_env_file(SENTINEL_ENV_PATH)
-    provider_env = _load_env_file(PROVIDER_ENV_PATH)
+    provider_settings = _merge_provider_settings()
 
     def pick(key: str) -> str:
-        return provider_env.get(key) or env_file.get(key) or os.getenv(key, "")
+        return provider_settings.get(key) or env_file.get(key) or os.getenv(key, "")
 
     sentinel_port = pick("SENTINEL_PORT") or "3636"
     sentinel_node = pick("SENTINEL_NODE")
@@ -1673,6 +2293,7 @@ def import_provider_bundle():
     sentinel_cfg_obj = payload.get("sentinel_config")
     sentinel_cfg_raw = payload.get("sentinel_config_raw")
     env_file = payload.get("env_file")
+    provider_settings = payload.get("provider_settings")
     skipped_services = []
 
     # Parse and filter sentinel.yaml if provided
@@ -1723,6 +2344,12 @@ def import_provider_bundle():
                     f.write(f"{k}={shlex.quote(str(v))}\n")
         except OSError as e:
             return jsonify({"error": "failed to write sentinel env", "detail": str(e)}), 500
+
+    # Persist provider settings if provided (mnemonic rotation must be done separately)
+    if isinstance(provider_settings, dict):
+        merged_provider_settings = _merge_provider_settings(provider_settings)
+        _apply_provider_settings(merged_provider_settings)
+        _write_provider_settings_file(merged_provider_settings)
 
     restart_output = ""
     try:
