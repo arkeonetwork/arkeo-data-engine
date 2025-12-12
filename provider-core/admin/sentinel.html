@@ -232,7 +232,14 @@
 </div>
 
 <script>
-    const DEFAULT_ADMIN_API_PORT = "9999";
+    const DEFAULT_ADMIN_API_PORT = (() => {
+        try {
+            const u = new URL(window.location.href);
+            return u.searchParams.get("api_port") || "9999";
+        } catch (e) {
+            return "9999";
+        }
+    })();
     let adminHost = (window.location && window.location.hostname) || "localhost";
     let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
     let adminPasswordEnabled = false;
@@ -308,6 +315,41 @@
     function resolveApi(path) {
         if (!path.startsWith("/")) path = `/${path}`;
         return `${adminApiBase}${path}`;
+    }
+
+    async function detectAdminApiBase() {
+        const tried = new Set();
+        let apiHostOverride = null;
+        let apiPortOverride = null;
+        try {
+            const u = new URL(window.location.href);
+            apiHostOverride = u.searchParams.get("api_host") || null;
+            apiPortOverride = u.searchParams.get("api_port") || null;
+        } catch (e) {}
+        if (apiPortOverride) {
+            adminApiBase = buildBaseUrl(apiHostOverride || adminHost, apiPortOverride);
+            return;
+        }
+        const candidatePorts = [
+            "9990",
+            DEFAULT_ADMIN_API_PORT,
+            "9999",
+        ].filter(Boolean);
+        for (const port of candidatePorts) {
+            const base = buildBaseUrl(apiHostOverride || adminHost, port);
+            if (tried.has(base)) continue;
+            tried.add(base);
+            try {
+                const res = await fetch(`${base}/api/ping`, { cache: "no-store" });
+                if (res.ok) {
+                    adminApiBase = base;
+                    return;
+                }
+            } catch (e) {
+                continue;
+            }
+        }
+        // fallback: keep existing adminApiBase
     }
 
     async function loadInfo() {
@@ -512,7 +554,8 @@
         }
     }
 
-    window.addEventListener("load", () => {
+    window.addEventListener("load", async () => {
+        await detectAdminApiBase();
         fetchAdminPasswordStatus(true);
         loadInfo();
     });
