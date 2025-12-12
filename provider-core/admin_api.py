@@ -1243,7 +1243,13 @@ def sentinel_metadata():
     force_loopback = request.args.get("loopback") not in (None, "", "0", "false", "False")
     quiet = request.args.get("quiet") not in (None, "", "0", "false", "False")
     if force_loopback:
-        url = "http://127.0.0.1:3636/metadata.json"
+        settings = _merge_provider_settings()
+        sentinel_port = str(
+            settings.get("SENTINEL_PORT")
+            or os.getenv("SENTINEL_PORT")
+            or DEFAULT_SENTINEL_PORT
+        )
+        url = f"http://127.0.0.1:{sentinel_port}/metadata.json"
     else:
         url = request.args.get("url") or request.args.get("sentinel_uri") or SENTINEL_URI_DEFAULT
     if not url:

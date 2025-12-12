@@ -215,7 +215,7 @@
 </div>
 
 <script>
-    const DEFAULT_ADMIN_API_PORT = (() => {
+    let DEFAULT_ADMIN_API_PORT = (() => {
         try {
             const url = new URL(window.location.href);
             return url.searchParams.get("api_port") || "9999";
@@ -223,7 +223,7 @@
             return "9999";
         }
     })();
-    const DEFAULT_ADMIN_UI_PORT = (() => {
+    let DEFAULT_ADMIN_UI_PORT = (() => {
         try {
             const url = new URL(window.location.href);
             return url.searchParams.get("ui_port") || "8080";
@@ -233,6 +233,20 @@
     })();
     let adminHost = (window.location && window.location.hostname) || "localhost";
     let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+
+    async function loadRuntimePorts() {
+        try {
+            const res = await fetch("/runtime-ports.json", { cache: "no-store" });
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data.ADMIN_API_PORT) DEFAULT_ADMIN_API_PORT = String(data.ADMIN_API_PORT);
+                if (data && data.ADMIN_PORT) DEFAULT_ADMIN_UI_PORT = String(data.ADMIN_PORT);
+                adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+            }
+        } catch (e) {
+            // ignore
+        }
+    }
 
     function buildBaseUrl(host, port) {
         const proto = (window.location && window.location.protocol === "https:") ? "https:" : "http:";
@@ -251,12 +265,9 @@
             apiPortOverride = u.searchParams.get("api_port") || null;
         } catch (e) {}
 
-        const candidatePorts = [
-            apiPortOverride,
-            "9990",
-            DEFAULT_ADMIN_API_PORT,
-            "9999",
-        ].filter(Boolean);
+        const candidatePorts = apiPortOverride
+            ? [apiPortOverride]
+            : [DEFAULT_ADMIN_API_PORT].filter(Boolean);
         for (const port of candidatePorts) {
             const hostToUse = apiHostOverride || adminHost;
             const base = buildBaseUrl(hostToUse, port);
@@ -1499,6 +1510,7 @@ let earningsChartCache = {};
     }
 
     window.addEventListener('load', async () => {
+        await loadRuntimePorts();
         await detectAdminApiBase();
         const ok = await ensureProviderSettingsExists();
         if (!ok) return;

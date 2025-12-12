@@ -232,7 +232,7 @@
 </div>
 
 <script>
-    const DEFAULT_ADMIN_API_PORT = (() => {
+    let DEFAULT_ADMIN_API_PORT = (() => {
         try {
             const u = new URL(window.location.href);
             return u.searchParams.get("api_port") || "9999";
@@ -242,6 +242,20 @@
     })();
     let adminHost = (window.location && window.location.hostname) || "localhost";
     let adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+    async function loadRuntimePorts() {
+        try {
+            const res = await fetch("/runtime-ports.json", { cache: "no-store" });
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data.ADMIN_API_PORT) {
+                    DEFAULT_ADMIN_API_PORT = String(data.ADMIN_API_PORT);
+                    adminApiBase = buildBaseUrl(adminHost, DEFAULT_ADMIN_API_PORT);
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
+    }
     let adminPasswordEnabled = false;
     let adminSessionAuthed = false;
     function requirePasswordGate() {
@@ -330,11 +344,7 @@
             adminApiBase = buildBaseUrl(apiHostOverride || adminHost, apiPortOverride);
             return;
         }
-        const candidatePorts = [
-            "9990",
-            DEFAULT_ADMIN_API_PORT,
-            "9999",
-        ].filter(Boolean);
+        const candidatePorts = [DEFAULT_ADMIN_API_PORT].filter(Boolean);
         for (const port of candidatePorts) {
             const base = buildBaseUrl(apiHostOverride || adminHost, port);
             if (tried.has(base)) continue;
@@ -560,6 +570,7 @@
     }
 
     window.addEventListener("load", async () => {
+        await loadRuntimePorts();
         await detectAdminApiBase();
         fetchAdminPasswordStatus(true);
         loadInfo();

@@ -55,6 +55,14 @@ echo "  ARKEOD_HOME           = $ARKEOD_HOME"
 echo "  ARKEOD_NODE           = $ARKEOD_NODE"
 echo "  ADMIN_PORT            = $ADMIN_PORT"
 
+# Write runtime ports for the UI to consume (served by python http.server)
+cat > /app/admin/runtime-ports.json <<EOF
+{
+  "ADMIN_PORT": "$ADMIN_PORT",
+  "ADMIN_API_PORT": "$ADMIN_API_PORT"
+}
+EOF
+
 # Ensure home directory exists
 mkdir -p "$ARKEOD_HOME"
 mkdir -p /app/config
