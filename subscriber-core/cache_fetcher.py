@@ -22,9 +22,10 @@ ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeo"))
 ARKEOD_NODE = os.getenv("ARKEOD_NODE") or os.getenv("EXTERNAL_ARKEOD_NODE") or "tcp://provider1.innovationtheory.com:26657"
 ARKEO_REST_API = os.getenv("ARKEO_REST_API") or os.getenv("EXTERNAL_ARKEO_REST_API") or "http://provider1.innovationtheory.com:1317"
 CACHE_DIR = os.getenv("CACHE_DIR", "/app/cache")
+CONFIG_DIR = os.getenv("CONFIG_DIR", "/app/config")
 CACHE_FETCH_INTERVAL = 0  # populated below via env
 STATUS_FILE = os.path.join(CACHE_DIR, "_sync_status.json")
-SUBSCRIBER_SETTINGS_PATH = os.path.join(CACHE_DIR, "subscriber-settings.json")
+SUBSCRIBER_SETTINGS_PATH = os.path.join(CONFIG_DIR, "subscriber-settings.json")
 METADATA_CACHE_PATH = os.path.join(CACHE_DIR, "metadata.json")
 ALLOW_LOCALHOST_SENTINEL_URIS = str(os.getenv("ALLOW_LOCALHOST_SENTINEL_URIS") or "0").lower() in {"1", "true", "yes", "y", "on"}
 

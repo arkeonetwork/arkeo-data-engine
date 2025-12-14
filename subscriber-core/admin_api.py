@@ -31,6 +31,7 @@ from cache_fetcher import (
 )
 
 app = Flask(__name__)
+CONFIG_DIR = os.getenv("CONFIG_DIR", "/app/config")
 CACHE_DIR = os.getenv("CACHE_DIR", "/app/cache")
 LISTENERS_FILE = os.path.join(CACHE_DIR, "listeners.json")
 LISTENER_PORT_START = int(os.getenv("LISTENER_PORT_START", "62001"))
@@ -266,7 +267,7 @@ SENTINEL_CONFIG_PATH = os.getenv("SENTINEL_CONFIG_PATH", "/app/config/sentinel.y
 SENTINEL_ENV_PATH = os.getenv("SENTINEL_ENV_PATH", "/app/config/sentinel.env")
 SUBSCRIBER_ENV_PATH = os.getenv("SUBSCRIBER_ENV_PATH", "/app/config/subscriber.env")
 SUBSCRIBER_SETTINGS_PATH = os.getenv("SUBSCRIBER_SETTINGS_PATH") or os.path.join(
-    CACHE_DIR or "/app/cache", "subscriber-settings.json"
+    CONFIG_DIR or "/app/config", "subscriber-settings.json"
 )
 ADMIN_PASSWORD_PATH = os.getenv("ADMIN_PASSWORD_PATH") or (
     os.path.join(CACHE_DIR or "/app/cache", "admin_password.txt")
