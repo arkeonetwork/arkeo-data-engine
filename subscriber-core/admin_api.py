@@ -2721,7 +2721,7 @@ _env_osmo_denoms = [d.strip() for d in (os.getenv("OSMOSIS_USDC_DENOMS") or "").
 OSMOSIS_USDC_DENOMS = _env_osmo_denoms if _env_osmo_denoms else DEFAULT_OSMOSIS_USDC_DENOMS.copy()
 MIN_OSMO_GAS = _safe_float(os.getenv("MIN_OSMO_GAS") or 0.1, 0.1)
 DEFAULT_SLIPPAGE_BPS = int(os.getenv("DEFAULT_SLIPPAGE_BPS") or "100")
-OSMO_TO_ARKEO_CHANNEL = os.getenv("OSMO_TO_ARKEO_CHANNEL") or "channel-103074"
+OSMO_TO_ARKEO_CHANNEL = os.getenv("OSMO_TO_ARKEO_CHANNEL") or ""
 # Reverse direction (Arkeo -> Osmosis) based on chain-registry entry
 ARKEO_TO_OSMO_CHANNEL = os.getenv("ARKEO_TO_OSMO_CHANNEL") or "channel-1"
 ARRIVAL_TOLERANCE_BPS = int(os.getenv("ARRIVAL_TOLERANCE_BPS") or "100")  # allow slight shortfall when checking arrival
@@ -2966,7 +2966,6 @@ def _ensure_tcp_scheme(url: str | None) -> str:
 
 def _default_subscriber_settings() -> dict:
     """Return defaults from env + sane fallbacks."""
-    rest_api_env = os.getenv("ARKEO_REST_API") or os.getenv("EXTERNAL_ARKEO_REST_API") or os.getenv("ARKEO_REST_API_PORT") or ""
     defaults = {
         "SUBSCRIBER_NAME": os.getenv("SUBSCRIBER_NAME", "Arkeo Core Subscriber"),
         "KEY_NAME": os.getenv("KEY_NAME", KEY_NAME),
@@ -2977,7 +2976,6 @@ def _default_subscriber_settings() -> dict:
         "ARKEOD_NODE": _strip_quotes(
             os.getenv("ARKEOD_NODE") or os.getenv("EXTERNAL_ARKEOD_NODE") or ARKEOD_NODE
         ),
-        "ARKEO_REST_API": rest_api_env,
         "ADMIN_PORT": os.getenv("ADMIN_PORT") or os.getenv("ENV_ADMIN_PORT") or "8079",
         "ADMIN_API_PORT": os.getenv("ADMIN_API_PORT") or str(API_PORT),
         "ALLOW_LOCALHOST_SENTINEL_URIS": os.getenv("ALLOW_LOCALHOST_SENTINEL_URIS") or "0",
@@ -3038,11 +3036,7 @@ def _merge_subscriber_settings(overrides: dict | None = None) -> dict:
     if merged.get("EXTERNAL_ARKEOD_NODE") and not merged.get("ARKEOD_NODE"):
         merged["ARKEOD_NODE"] = merged["EXTERNAL_ARKEOD_NODE"]
     merged.pop("EXTERNAL_ARKEOD_NODE", None)
-    if merged.get("EXTERNAL_ARKEO_REST_API") and not merged.get("ARKEO_REST_API_PORT") and not merged.get("ARKEO_REST_API"):
-        merged["ARKEO_REST_API"] = merged["EXTERNAL_ARKEO_REST_API"]
     merged.pop("EXTERNAL_ARKEO_REST_API", None)
-    if merged.get("ARKEO_REST_API_PORT") and not merged.get("ARKEO_REST_API"):
-        merged["ARKEO_REST_API"] = merged["ARKEO_REST_API_PORT"]
     merged.pop("ARKEO_REST_API_PORT", None)
     merged["ARKEOD_HOME"] = _expand_tilde(merged.get("ARKEOD_HOME") or ARKEOD_HOME)
     if merged.get("ARKEOD_NODE"):
@@ -3072,7 +3066,6 @@ def _apply_subscriber_settings(settings: dict) -> None:
     CHAIN_ID = _strip_quotes(settings.get("CHAIN_ID") or CHAIN_ID)
     NODE_ARGS = ["--node", ARKEOD_NODE] if ARKEOD_NODE else []
     CHAIN_ARGS = ["--chain-id", CHAIN_ID] if CHAIN_ID else []
-    rest_api_val = settings.get("ARKEO_REST_API") or ""
     ETH_RPC = _strip_quotes(settings.get("ETH_RPC") or ETH_RPC or "")
     ETH_USDC_CONTRACT = _strip_quotes(settings.get("ETH_USDC_CONTRACT") or ETH_USDC_CONTRACT or "")
     try:
@@ -3090,26 +3083,7 @@ def _apply_subscriber_settings(settings: dict) -> None:
         OSMOSIS_USDC_DENOMS = denoms
     except Exception:
         OSMOSIS_USDC_DENOMS = DEFAULT_OSMOSIS_USDC_DENOMS.copy()
-    try:
-        MIN_OSMO_GAS = _safe_float(settings.get("MIN_OSMO_GAS") if settings.get("MIN_OSMO_GAS") not in (None, "") else MIN_OSMO_GAS, MIN_OSMO_GAS)
-    except Exception:
-        MIN_OSMO_GAS = 0.1
-    try:
-        DEFAULT_SLIPPAGE_BPS = int(settings.get("DEFAULT_SLIPPAGE_BPS") if settings.get("DEFAULT_SLIPPAGE_BPS") not in (None, "") else DEFAULT_SLIPPAGE_BPS or 100)
-    except Exception:
-        DEFAULT_SLIPPAGE_BPS = 100
-    try:
-        ARRIVAL_TOLERANCE_BPS = int(settings.get("ARRIVAL_TOLERANCE_BPS") if settings.get("ARRIVAL_TOLERANCE_BPS") not in (None, "") else ARRIVAL_TOLERANCE_BPS or 100)
-    except Exception:
-        ARRIVAL_TOLERANCE_BPS = 100
-    try:
-        OSMO_TO_ARKEO_CHANNEL = settings.get("OSMO_TO_ARKEO_CHANNEL") or OSMO_TO_ARKEO_CHANNEL
-    except Exception:
-        OSMO_TO_ARKEO_CHANNEL = OSMO_TO_ARKEO_CHANNEL
-    try:
-        ARKEO_TO_OSMO_CHANNEL = settings.get("ARKEO_TO_OSMO_CHANNEL") or ARKEO_TO_OSMO_CHANNEL
-    except Exception:
-        ARKEO_TO_OSMO_CHANNEL = ARKEO_TO_OSMO_CHANNEL
+    # MIN_OSMO_GAS, DEFAULT_SLIPPAGE_BPS, ARRIVAL_TOLERANCE_BPS, and channel defaults are hardcoded/env-driven; do not override from settings
     OSMOSIS_RPC = _strip_quotes(settings.get("OSMOSIS_RPC") or OSMOSIS_RPC or "")
 
     # Best-effort auto-discover Osmosis->Arkeo channel if missing
@@ -3131,7 +3105,6 @@ def _apply_subscriber_settings(settings: dict) -> None:
         "CHAIN_ID": CHAIN_ID,
         "ARKEOD_HOME": ARKEOD_HOME,
         "ARKEOD_NODE": ARKEOD_NODE,
-        "ARKEO_REST_API": rest_api_val,
         "ADMIN_PORT": settings.get("ADMIN_PORT", ""),
         "ADMIN_API_PORT": settings.get("ADMIN_API_PORT", ""),
         "ALLOW_LOCALHOST_SENTINEL_URIS": settings.get("ALLOW_LOCALHOST_SENTINEL_URIS", ""),
@@ -3146,11 +3119,11 @@ def _apply_subscriber_settings(settings: dict) -> None:
         "OSMOSIS_ADDRESS": settings.get("OSMOSIS_ADDRESS", ""),
         "USDC_OSMO_DENOM": settings.get("USDC_OSMO_DENOM", ""),
         "ARKEO_OSMO_DENOM": settings.get("ARKEO_OSMO_DENOM", ""),
-        "MIN_OSMO_GAS": settings.get("MIN_OSMO_GAS", ""),
-        "DEFAULT_SLIPPAGE_BPS": settings.get("DEFAULT_SLIPPAGE_BPS", ""),
-        "OSMO_TO_ARKEO_CHANNEL": settings.get("OSMO_TO_ARKEO_CHANNEL", ""),
-        "ARKEO_TO_OSMO_CHANNEL": settings.get("ARKEO_TO_OSMO_CHANNEL", ""),
-        "ARRIVAL_TOLERANCE_BPS": settings.get("ARRIVAL_TOLERANCE_BPS", ""),
+        "MIN_OSMO_GAS": MIN_OSMO_GAS,
+        "DEFAULT_SLIPPAGE_BPS": DEFAULT_SLIPPAGE_BPS,
+        "OSMO_TO_ARKEO_CHANNEL": OSMO_TO_ARKEO_CHANNEL,
+        "ARKEO_TO_OSMO_CHANNEL": ARKEO_TO_OSMO_CHANNEL,
+        "ARRIVAL_TOLERANCE_BPS": ARRIVAL_TOLERANCE_BPS,
     }
     for k, v in env_overrides.items():
         if v is None:
@@ -3739,7 +3712,7 @@ def eth_block_height():
     """Return the latest Ethereum block height from ETH_RPC."""
     height, err = _eth_block_height_internal()
     if err:
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err}), 200
     return jsonify({"height": height})
 
 
@@ -3838,7 +3811,7 @@ def eth_balance():
     """Return ETH balance for the derived ETH wallet."""
     bal, err = _eth_balance_internal()
     if err:
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err}), 200
     return jsonify({"balance": bal})
 
 
@@ -3847,7 +3820,7 @@ def eth_usdc_balance():
     """Return USDC balance for the derived ETH wallet."""
     bal, err = _eth_token_balance_internal(ETH_USDC_CONTRACT, ETH_USDC_DECIMALS, "USDC")
     if err:
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err}), 200
     return jsonify({"balance": bal})
 
 
@@ -3879,7 +3852,7 @@ def osmosis_block_height():
     """Return the latest Osmosis block height from OSMOSIS_RPC."""
     height, err = _osmosis_block_height_internal()
     if err:
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err}), 200
     return jsonify({"height": height})
 
 
@@ -3961,7 +3934,7 @@ def osmosis_balance():
     """Return Osmosis balance for the derived Osmosis wallet."""
     bal, err = _osmosis_balance_internal()
     if err:
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err}), 200
     if isinstance(bal, dict):
         return jsonify(bal)
     return jsonify({"balance": bal})
@@ -3973,13 +3946,13 @@ def osmosis_assets():
     settings = _merge_subscriber_settings()
     settings, err = _ensure_osmo_wallet(settings)
     if err:
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err}), 200
     addr = settings.get("OSMOSIS_ADDRESS")
     if not addr:
-        return jsonify({"error": "OSMOSIS_ADDRESS not available"}), 500
+        return jsonify({"error": "OSMOSIS_ADDRESS not available"}), 200
     assets, err = _resolve_osmo_assets(addr)
     if err:
-        return jsonify({"error": err}), 500
+        return jsonify({"error": err}), 200
     return jsonify({"address": addr, "assets": assets or []})
 
 
@@ -4498,7 +4471,7 @@ def provider_info():
     keyring_backend = KEYRING
     fees = FEES_DEFAULT
     bond = BOND_DEFAULT
-    rest_api_val = os.getenv("ARKEO_REST_API") or os.getenv("EXTERNAL_ARKEO_REST_API") or ""
+    rest_api_val = ""
 
     base = provider_pubkeys_response(user, keyring_backend)
     address, addr_err = derive_address(user, keyring_backend)
@@ -8584,7 +8557,6 @@ def sentinel_config():
         "PORT",
         "SOURCE_CHAIN",
         "PROVIDER_HUB_URI",
-        "ARKEO_REST_API",
         "EVENT_STREAM_HOST",
         "FREE_RATE_LIMIT",
         "FREE_RATE_LIMIT_DURATION",
@@ -8648,10 +8620,9 @@ def update_sentinel_config():
     _set_env("LOCATION", location)
     _set_env("FREE_RATE_LIMIT", free_rate_limit)
     _set_env("FREE_RATE_LIMIT_DURATION", free_rate_limit_duration)
-    # Keep ARKEO_REST_API in sync with PROVIDER_HUB_URI if provided
+    # Keep PROVIDER_HUB_URI in sync if provided
     if payload.get("provider_hub_uri"):
         _set_env("PROVIDER_HUB_URI", payload.get("provider_hub_uri"))
-        _set_env("ARKEO_REST_API", payload.get("provider_hub_uri"))
 
     # Prefer explicit provider_name for the YAML provider.name; do not fall back to moniker
     effective_provider_name = provider_name or config.get("provider", {}).get("name") or os.getenv("PROVIDER_NAME") or env_file.get("PROVIDER_NAME")
