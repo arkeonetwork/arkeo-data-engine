@@ -880,7 +880,7 @@ pre {
 }
 #convertUsdcModal .estimate-note {
     font-size: 12px;
-    color: var(--muted);
+    color: var(--blue-accent);
 }
 #convertUsdcModal form {
     display: flex;
@@ -899,6 +899,192 @@ pre {
 #convertUsdcModal .form-row:last-child {
     flex: 1 1 auto;
     min-height: 0;
+}
+
+.field-inline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.mini-btn {
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background: #1f2937;
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    cursor: pointer;
+}
+.mini-btn:hover {
+    border-color: var(--blue-accent);
+    color: var(--blue-accent);
+}
+
+/* Reuse the same layout/styling for ARKEO->USDC modal */
+#convertArkeoModal .convert-row {
+    display: flex;
+    flex-direction: row;
+    gap: 12px;
+    width: 100%;
+}
+#convertArkeoModal .convert-row .field-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 0;
+    min-width: 0;
+}
+#convertArkeoModal .estimate-box {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.03);
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    color: var(--text);
+    font-size: 12px;
+}
+#convertArkeoModal .estimate-note {
+    font-size: 12px;
+    color: var(--blue-accent);
+}
+#convertArkeoModal form {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+#convertArkeoModal .form-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+}
+#convertArkeoModal .form-row {
+    display: flex;
+    flex-direction: column;
+}
+#convertArkeoModal .form-row:last-child {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+#convertArkeoLog {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Match styling for USDC->OSMO modal */
+#convertUsdcOsmoModal .convert-row {
+    display: flex;
+    flex-direction: row;
+    gap: 12px;
+    width: 100%;
+}
+#convertUsdcOsmoModal .convert-row .field-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 0;
+    min-width: 0;
+}
+#convertUsdcOsmoModal .estimate-box {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.03);
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    color: var(--text);
+    font-size: 12px;
+}
+#convertUsdcOsmoModal .estimate-note {
+    font-size: 12px;
+    color: var(--blue-accent);
+}
+#convertUsdcOsmoModal form {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+#convertUsdcOsmoModal .form-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+}
+#convertUsdcOsmoModal .form-row {
+    display: flex;
+    flex-direction: column;
+}
+#convertUsdcOsmoModal .form-row:last-child {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+#convertUsdcOsmoLog {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* ARKEO -> Native modal matches convert styling */
+#convertArkeoNativeModal .convert-row {
+    display: flex;
+    flex-direction: row;
+    gap: 12px;
+    width: 100%;
+}
+#convertArkeoNativeModal .convert-row .field-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 0;
+    min-width: 0;
+}
+#convertArkeoNativeModal .estimate-box {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.03);
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    color: var(--text);
+    font-size: 12px;
+}
+#convertArkeoNativeModal .estimate-note {
+    font-size: 12px;
+    color: var(--blue-accent);
+}
+#convertArkeoNativeModal form {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+#convertArkeoNativeModal .form-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+}
+#convertArkeoNativeModal .form-row {
+    display: flex;
+    flex-direction: column;
+}
+#convertArkeoNativeModal .form-row:last-child {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+#convertArkeoNativeLog {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
 }
 #convertUsdcLog {
     flex: 1 1 auto;
@@ -1008,6 +1194,9 @@ pre {
 }
 .hotwallet-card {
     user-select: none;
+    box-shadow: none;
+    border: 1px solid #364154;
+    border-top: none;
 }
 .wallet-title {
     font-weight: 700;
@@ -1333,3 +1522,8 @@ pre {
 }
 
 .actions.align-right { justify-content: flex-end; }
+.convert-label {
+    color: #fff;
+    font-weight: 700;
+    font-size: 14px;
+}

@@ -767,6 +767,32 @@ def _load_listeners() -> Dict[str, Any]:
 def _write_listeners(payload: Dict[str, Any]) -> None:
     path = os.path.join(CACHE_DIR, "listeners.json")
     tmp_path = f"{path}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+    lock_path = f"{path}.lock"
+    lock_fh = None
+    try:
+        import fcntl  # POSIX
+
+        lock_fh = open(lock_path, "w")
+        deadline = time.time() + 3.0
+        while True:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    print(f"[cache] listeners lock timeout for {path}", flush=True)
+                    if lock_fh:
+                        lock_fh.close()
+                    return
+                time.sleep(0.05)
+    except Exception as e:
+        print(f"[cache] listeners lock failed: {e}", flush=True)
+        if lock_fh:
+            try:
+                lock_fh.close()
+            except Exception:
+                pass
+        lock_fh = None
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
@@ -777,12 +803,25 @@ def _write_listeners(payload: Dict[str, Any]) -> None:
             print(f"[cache] wrote listeners.json (tmp={tmp_path})", flush=True)
         except Exception:
             pass
-    except OSError:
+    except OSError as e:
+        print(f"[cache] failed to write listeners.json: {e}", flush=True)
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except OSError:
             pass
+    finally:
+        if lock_fh:
+            try:
+                import fcntl as _fcntl
+
+                _fcntl.flock(lock_fh, _fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_fh.close()
+            except Exception:
+                pass
 
 
 def _sync_listeners_from_active(active_services_payload: Dict[str, Any], active_providers_payload: Dict[str, Any], provider_services_payload: Dict[str, Any]) -> Dict[str, Any]:

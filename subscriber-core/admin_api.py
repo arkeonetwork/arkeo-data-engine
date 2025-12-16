@@ -35,6 +35,8 @@ app = Flask(__name__)
 CONFIG_DIR = os.getenv("CONFIG_DIR", "/app/config")
 CACHE_DIR = os.getenv("CACHE_DIR", "/app/cache")
 LISTENERS_FILE = os.path.join(CACHE_DIR, "listeners.json")
+HOTWALLET_LOG = os.path.join(CACHE_DIR, "hotwallet_status.log")
+HOTWALLET_LOG_MAX_BYTES = int(os.getenv("HOTWALLET_LOG_MAX_BYTES") or "524288")  # ~512KB cap before rotation
 LISTENER_PORT_START = int(os.getenv("LISTENER_PORT_START", "62001"))
 LISTENER_PORT_END = int(os.getenv("LISTENER_PORT_END", "62100"))
 LISTENER_PORT_CONFIG = os.path.join(CACHE_DIR, "listener_port_config.json")
@@ -266,6 +268,23 @@ def _pick_executable(name: str, candidates: list[str]) -> str | None:
 def _append_hotwallet_log(entry: dict) -> None:
     """Append a JSONL entry to the hotwallet log (best effort)."""
     try:
+        # rotate if too large
+        if os.path.isfile(HOTWALLET_LOG) and os.path.getsize(HOTWALLET_LOG) > HOTWALLET_LOG_MAX_BYTES:
+            try:
+                backup = f"{HOTWALLET_LOG}.bak.{int(time.time())}"
+                os.rename(HOTWALLET_LOG, backup)
+                # keep the last 500 lines from the backup to seed the new log
+                try:
+                    with open(backup, "r", encoding="utf-8", errors="replace") as bf:
+                        tail_lines = bf.readlines()[-500:]
+                    with open(HOTWALLET_LOG, "w", encoding="utf-8") as nf:
+                        nf.writelines(tail_lines)
+                except Exception:
+                    # fallback to empty new log
+                    open(HOTWALLET_LOG, "w").close()
+            except Exception:
+                pass
+
         os.makedirs(os.path.dirname(HOTWALLET_LOG), exist_ok=True)
         with open(HOTWALLET_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False))
@@ -275,7 +294,7 @@ def _append_hotwallet_log(entry: dict) -> None:
 
 
 def _read_hotwallet_logs(limit: int = 50) -> list[dict]:
-    """Return the last N log entries (newest first)."""
+    """Return the last N log entries in chronological order (oldest first)."""
     if not os.path.isfile(HOTWALLET_LOG):
         return []
     try:
@@ -283,7 +302,7 @@ def _read_hotwallet_logs(limit: int = 50) -> list[dict]:
             lines = f.readlines()
         lines = lines[-limit:]
         out: list[dict] = []
-        for ln in reversed(lines):
+        for ln in lines:
             try:
                 out.append(json.loads(ln))
             except Exception:
@@ -415,6 +434,19 @@ def hotwallet_logs():
         limit = 50
     logs = _read_hotwallet_logs(limit=limit)
     return jsonify({"logs": logs, "path": HOTWALLET_LOG})
+
+
+@app.post("/api/hotwallet/log-note")
+def hotwallet_log_note():
+    """Allow UI to append a short note into the hotwallet log for continuity with modal status."""
+    payload = request.get_json(silent=True) or {}
+    msg = str(payload.get("msg") or "").strip()
+    if not msg:
+        return jsonify({"error": "msg required"}), 400
+    # cap length to avoid abuse
+    msg = msg[:500]
+    _append_hotwallet_log({"action": "client_note", "msg": msg, "source": "ui"})
+    return jsonify({"ok": True})
 
 
 @app.post("/api/hotwallet/send-usdc")
@@ -1277,6 +1309,324 @@ def _osmosis_quote_usdc_to_arkeo(amount_float: float) -> tuple[dict | None, str 
     )
 
 
+def _osmosis_quote_arkeo_to_usdc(amount_float: float) -> tuple[dict | None, str | None]:
+    """Quote USDC out for a given ARKEO in (pool 2977, reverse direction)."""
+    if amount_float <= 0:
+        return None, "amount must be > 0"
+    if not OSMOSIS_RPC:
+        return None, "OSMOSIS_RPC not configured"
+
+    settings = _merge_subscriber_settings()
+    settings, err = _ensure_osmo_wallet(settings)
+    if err:
+        return None, err
+    osmo_addr = settings.get("OSMOSIS_ADDRESS")
+    balances = []
+    try:
+        balances = _osmosis_balances_raw(osmo_addr)
+    except Exception:
+        balances = []
+
+    usdc_denom = settings.get("USDC_OSMO_DENOM") or os.getenv("USDC_OSMO_DENOM") or ""
+    if not usdc_denom:
+        usdc_denom, _ = _pick_usdc_osmo_denom(balances)
+    arkeo_denom = _discover_arkeo_osmo_denom(balances)
+    if not arkeo_denom:
+        return None, "ARKEO denom on Osmosis not found"
+    if not usdc_denom:
+        return None, "USDC denom on Osmosis not found"
+
+    amt_in_base = int(round(amount_float * 100_000_000))  # ARKEO 8 decimals
+    if amt_in_base <= 0:
+        return None, "amount too small"
+
+    # Compute directly from pool reserves to avoid CLI flag differences
+    pool_state, pool_err = _pool_2977_state()
+    if pool_err or not pool_state:
+        return None, pool_err or "pool unavailable"
+    usdc_res = pool_state.get("reserve_usdc") or 0
+    arkeo_res = pool_state.get("reserve_arkeo") or 0
+    if usdc_res <= 0 or arkeo_res <= 0:
+        return None, "pool reserves unavailable"
+    swap_fee = pool_state.get("swap_fee") or 0.003  # default if missing
+    fee_adj_in = amt_in_base * (1 - swap_fee)
+    out_base = int((fee_adj_in * usdc_res) / (arkeo_res + fee_adj_in)) if (arkeo_res + fee_adj_in) > 0 else 0
+    if out_base <= 0:
+        return None, "quote returned zero"
+    min_out_base = max(1, int(out_base * (1 - (DEFAULT_SLIPPAGE_BPS / 10_000.0))))
+    return (
+        {
+            "amount_in": amount_float,
+            "amount_in_base": amt_in_base,
+            "amount_out": out_base / 1e6,  # USDC 6 decimals
+            "amount_out_base": out_base,
+            "min_amount_out": min_out_base / 1e6,
+            "min_amount_out_base": min_out_base,
+            "slippage_bps": DEFAULT_SLIPPAGE_BPS,
+            "usdc_denom": usdc_denom,
+            "arkeo_denom": arkeo_denom,
+            "pool_id": "2977",
+            "swap_fee": swap_fee,
+            "mode": "computed",
+        },
+        None,
+    )
+
+def _pool_contains_denoms(pool: dict, denom_a: str, denom_b: str) -> bool:
+    assets = (pool.get("pool") or {}).get("pool_assets") or (pool.get("pool_assets") or [])
+    found_a = False
+    found_b = False
+    for pa in assets:
+        token = pa.get("token") if isinstance(pa, dict) else {}
+        d = token.get("denom", "")
+        if d == denom_a:
+            found_a = True
+        if d == denom_b:
+            found_b = True
+    return found_a and found_b
+
+
+def _pick_best_usdc_osmo_pool(usdc_denom: str) -> tuple[str | None, dict | None]:
+    """Pick best USDC-uosmo pool by liquidity score (usdc*osmo), filter dust/high-fee. Returns (pool_id, meta)."""
+    if not OSMOSIS_RPC or not usdc_denom:
+        return None, None
+    try:
+        code, out = run_list(
+            [
+                "osmosisd",
+                "query",
+                "poolmanager",
+                "all-pools",
+                "--node",
+                OSMOSIS_RPC,
+                "--output",
+                "json",
+            ]
+        )
+        if code != 0:
+            return None, None
+        data = json.loads(out)
+        pools = data.get("pools") or []
+        best = None
+        best_meta = None
+        for p in pools:
+            try:
+                if not _pool_contains_denoms(p, usdc_denom, "uosmo"):
+                    continue
+                assets = (p.get("pool") or {}).get("pool_assets") or (p.get("pool_assets") or [])
+                usdc_res = 0
+                osmo_res = 0
+                for pa in assets:
+                    token = pa.get("token") if isinstance(pa, dict) else {}
+                    d = token.get("denom", "")
+                    amt = token.get("amount", "0")
+                    try:
+                        amt_int = int(amt)
+                    except Exception:
+                        amt_int = 0
+                    if d == usdc_denom:
+                        usdc_res = amt_int
+                    elif d == "uosmo":
+                        osmo_res = amt_int
+                # filter dust: require >= 100 USDC equivalent
+                if usdc_res < 100 * 1_000_000:
+                    continue
+                # fee
+                fee = 0.0
+                try:
+                    fee_raw = ((p.get("pool") or {}).get("pool_params") or {}).get("swap_fee")
+                    if fee_raw is not None:
+                        fee = float(fee_raw)
+                except Exception:
+                    fee = 0.0
+                if fee > 0.01:
+                    continue
+                score = usdc_res * osmo_res
+                pid = str(p.get("id") or (p.get("pool") or {}).get("id") or "")
+                if not pid:
+                    continue
+                if best is None or score > best:
+                    best = score
+                    best_meta = {"pool_id": pid, "usdc_res": usdc_res, "osmo_res": osmo_res, "fee": fee}
+            except Exception:
+                continue
+        if best_meta:
+            try:
+                _append_hotwallet_log(
+                    {
+                        "action": "select_usdc_osmo_pool",
+                        "pool_id": best_meta.get("pool_id"),
+                        "usdc_res": best_meta.get("usdc_res"),
+                        "osmo_res": best_meta.get("osmo_res"),
+                        "fee": best_meta.get("fee"),
+                        "score": best,
+                    }
+                )
+            except Exception:
+                pass
+            return str(best_meta.get("pool_id")), best_meta
+    except Exception:
+        return None, None
+    return None, None
+
+
+
+def _osmosis_quote_usdc_to_osmo(amount_float: float) -> tuple[dict | None, str | None]:
+    """Quote OSMO out for a given USDC in using pool 678 (single hop)."""
+    if amount_float <= 0:
+        return None, "amount must be > 0"
+    if not OSMOSIS_RPC:
+        return None, "OSMOSIS_RPC not configured"
+
+    settings = _merge_subscriber_settings()
+    settings, err = _ensure_osmo_wallet(settings)
+    if err:
+        return None, err
+    osmo_addr = settings.get("OSMOSIS_ADDRESS")
+    balances = []
+    try:
+        balances = _osmosis_balances_raw(osmo_addr)
+    except Exception:
+        balances = []
+
+    usdc_denom = settings.get("USDC_OSMO_DENOM") or os.getenv("USDC_OSMO_DENOM") or ""
+    if not usdc_denom:
+        usdc_denom, _ = _pick_usdc_osmo_denom(balances)
+    if not usdc_denom:
+        return None, "USDC denom on Osmosis not found"
+
+    amt_in_base = int(round(amount_float * 1_000_000))  # USDC 6 decimals
+    if amt_in_base <= 0:
+        return None, "amount too small"
+
+    # Determine best pool for USDC->OSMO
+    best_pool, best_meta = _pick_best_usdc_osmo_pool(usdc_denom)
+    pool_id = best_pool or USDC_OSMO_POOL_ID
+
+    # Try CLI estimators first (poolmanager with flags, then gamm with flags)
+    quote_cmds = [
+        [
+            "osmosisd",
+            "query",
+            "poolmanager",
+            "estimate-swap-exact-amount-in",
+            "--swap-route-pool-ids",
+            str(pool_id),
+            "--swap-route-denoms",
+            "uosmo",
+            "--token-in",
+            f"{amt_in_base}{usdc_denom}",
+            "--node",
+            OSMOSIS_RPC,
+            "--output",
+            "json",
+        ],
+        [
+            "osmosisd",
+            "query",
+            "gamm",
+            "estimate-swap-exact-amount-in",
+            f"{amt_in_base}{usdc_denom}",
+            "1",
+            "--swap-route-pool-ids",
+            str(pool_id),
+            "--swap-route-denoms",
+            "uosmo",
+            "--node",
+            OSMOSIS_RPC,
+            "--output",
+            "json",
+        ],
+    ]
+    code = 1
+    out = ""
+    for cmd in quote_cmds:
+        code, out = run_list(cmd)
+        if code == 0:
+            break
+    if code != 0:
+        # Fallback: compute directly from pool reserves (constant product)
+        try:
+            code_pool, out_pool = run_list(
+                [
+                    "osmosisd",
+                "query",
+                "gamm",
+                "pool",
+                str(pool_id),
+                "--node",
+                OSMOSIS_RPC,
+                "--output",
+                "json",
+            ]
+            )
+            if code_pool != 0:
+                return None, f"pool query failed exit={code_pool}: {out_pool}"
+            pool = json.loads(out_pool)
+            pool_assets = (pool.get("pool") or {}).get("pool_assets") or (pool.get("pool_assets") or [])
+            usdc_res = 0
+            osmo_res = 0
+            for pa in pool_assets:
+                token = pa.get("token") if isinstance(pa, dict) else {}
+                denom = token.get("denom", "")
+                amt = token.get("amount", "0")
+                try:
+                    amt_int = int(amt)
+                except Exception:
+                    amt_int = 0
+                if denom == usdc_denom:
+                    usdc_res = amt_int
+                elif denom == "uosmo":
+                    osmo_res = amt_int
+            swap_fee = 0.003
+            try:
+                swap_fee_raw = ((pool.get("pool") or {}).get("pool_params") or {}).get("swap_fee")
+                if swap_fee_raw is not None:
+                    swap_fee = float(swap_fee_raw)
+            except Exception:
+                pass
+            if usdc_res <= 0 or osmo_res <= 0:
+                return None, "pool reserves unavailable"
+            fee_adj_in = amt_in_base * (1 - swap_fee)
+            out_base = int((fee_adj_in * osmo_res) / (usdc_res + fee_adj_in)) if (usdc_res + fee_adj_in) > 0 else 0
+            if out_base <= 0:
+                return None, "quote returned zero"
+        except Exception as e:
+            return None, f"quote error: {e}"
+    else:
+        try:
+            data = json.loads(out)
+        except Exception:
+            return None, "quote parse error"
+        out_str = data.get("token_out_amount") or data.get("amount_out") or data.get("amount") or data.get("token_out") or ""
+        try:
+            out_base = int(out_str)
+        except Exception:
+            return None, f"quote invalid amount: {out_str}"
+        swap_fee = None
+
+    # For uosmo (6 decimals), apply slippage
+    min_out_base = max(1, int(out_base * (1 - (DEFAULT_SLIPPAGE_BPS / 10_000.0))))
+    return (
+        {
+            "amount_in": amount_float,
+            "amount_in_base": amt_in_base,
+            "amount_out": out_base / 1e6,
+            "amount_out_base": out_base,
+            "min_amount_out": min_out_base / 1e6,
+            "min_amount_out_base": min_out_base,
+            "slippage_bps": DEFAULT_SLIPPAGE_BPS,
+            "usdc_denom": usdc_denom,
+            "osmo_denom": "uosmo",
+            "pool_id": str(pool_id),
+            "swap_fee": swap_fee,
+            "mode": "computed" if code != 0 else "cli",
+            "pool_meta": best_meta or {},
+        },
+        None,
+    )
+
+
 def _pick_usdc_osmo_denom(balances: list[dict]) -> tuple[str | None, int]:
     """Pick a USDC denom from balances; returns (denom, available_base_units)."""
     best = None
@@ -1331,11 +1681,53 @@ def _write_bridge_denoms(usdc_denom: str | None, arkeo_denom: str | None):
 
 
 def _extract_txhash(out: str) -> str | None:
-    """Extract txhash: <hash> from osmosisd/arkeod output."""
+    """Extract txhash: <hash> from osmosisd/arkeod output (json or text)."""
     if not out:
         return None
+    # JSON payload?
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict):
+            txh = data.get("txhash") or data.get("txHash")
+            if txh and re.fullmatch(r"[0-9A-Fa-f]{64}", txh):
+                return txh
+            tx_resp = data.get("tx_response") or {}
+            txh = tx_resp.get("txhash")
+            if txh and re.fullmatch(r"[0-9A-Fa-f]{64}", txh):
+                return txh
+    except Exception:
+        pass
     m = re.search(r"txhash:\s*([0-9A-Fa-f]{64})", out)
     return m.group(1) if m else None
+
+
+def _parse_send_packet(data: dict) -> dict | None:
+    """Parse send_packet event (packet sequence + channels) from an osmosisd tx JSON."""
+    if not isinstance(data, dict):
+        return None
+    logs = []
+    if "logs" in data:
+        logs = data.get("logs") or []
+    elif "tx_response" in data:
+        logs = data.get("tx_response", {}).get("logs") or []
+    for log in logs:
+        events = log.get("events") or []
+        for ev in events:
+            if ev.get("type") != "send_packet":
+                continue
+            attrs = {a.get("key"): a.get("value") for a in ev.get("attributes") or []}
+            seq = attrs.get("packet_sequence")
+            src_ch = attrs.get("packet_src_channel")
+            dst_ch = attrs.get("packet_dst_channel")
+            if seq and src_ch and dst_ch:
+                return {
+                    "packet_sequence": seq,
+                    "src_channel": src_ch,
+                    "dst_channel": dst_ch,
+                    "src_port": attrs.get("packet_src_port"),
+                    "dst_port": attrs.get("packet_dst_port"),
+                }
+    return None
 
 
 def _wait_for_osmo_balance_increase(addr: str, denom: str, base: int, attempts: int = 12, sleep_s: int = 5) -> tuple[bool, int]:
@@ -1367,10 +1759,11 @@ def _wait_for_osmo_balance_increase(addr: str, denom: str, base: int, attempts: 
         return False, 0
 
 
-def _wait_for_osmo_tx_success(tx_hash: str, attempts: int = 30, sleep_s: int = 3) -> tuple[bool, str | None]:
+def _wait_for_osmo_tx_success(tx_hash: str, attempts: int = 10, sleep_s: int = 3) -> tuple[bool, str | None]:
     """Poll osmosisd query tx until success or failure; returns (success, raw_log_or_error)."""
     if not tx_hash:
         return False, "missing tx hash"
+    last_err: str | None = None
     for _ in range(attempts):
         try:
             code, out = run_list(
@@ -1386,6 +1779,7 @@ def _wait_for_osmo_tx_success(tx_hash: str, attempts: int = 30, sleep_s: int = 3
                 ]
             )
             if code != 0:
+                last_err = out or f"query exit {code}"
                 time.sleep(sleep_s)
                 continue
             data = json.loads(out)
@@ -1394,11 +1788,12 @@ def _wait_for_osmo_tx_success(tx_hash: str, attempts: int = 30, sleep_s: int = 3
             raw_log = tx_resp.get("raw_log", "")
             if tx_code == 0:
                 return True, raw_log
-            return False, raw_log
-        except Exception:
+            return False, raw_log or f"tx failed code={tx_code}"
+        except Exception as e:
+            last_err = str(e)
             time.sleep(sleep_s)
             continue
-    return False, "tx not found or not included"
+    return False, last_err or "tx not found or not included"
 
 
 def _arkeo_balance(addr: str) -> tuple[int, str | None]:
@@ -1434,25 +1829,31 @@ def _arkeo_balance(addr: str) -> tuple[int, str | None]:
         return 0, str(e)
 
 
-def _wait_for_arkeo_balance_increase(addr: str, expected_base: int, tolerance_bps: int = 100, attempts: int = 40, sleep_s: int = 5) -> tuple[bool, int]:
-    """Poll Arkeo balance until uarkeo increases close to expected_base; returns (ok, final_amt)."""
+def _wait_for_arkeo_balance_increase(
+    addr: str, expected_base: int, tolerance_bps: int = 100, attempts: int = 6, sleep_s: int = 5, start_amt: int | None = None
+) -> tuple[bool, int, int]:
+    """Poll Arkeo balance until uarkeo increases close to expected_base; returns (ok, final_amt, error_count)."""
+    err_count = 0
     try:
-        start_amt, err = _arkeo_balance(addr)
-        if err:
-            return False, 0
+        if start_amt is None:
+            start_amt, err = _arkeo_balance(addr)
+            if err:
+                return False, 0, err_count
         last_amt = start_amt
         min_delta = max(1, int(expected_base * (1 - (tolerance_bps / 10_000.0))))
         for _ in range(attempts):
             time.sleep(sleep_s)
             amt, err2 = _arkeo_balance(addr)
             if err2:
+                err_count += 1
                 continue
             last_amt = amt
             if amt >= start_amt + min_delta:
-                return True, amt
-        return False, last_amt
+                return True, amt, err_count
+        return False, last_amt, err_count
     except Exception:
-        return False, 0
+        err_count += 1
+        return False, 0, err_count
 
 
 @app.post("/api/hotwallet/convert-usdc-to-arkeo")
@@ -1494,6 +1895,15 @@ def hotwallet_convert_usdc_to_arkeo():
         balances = _osmosis_balances_raw(osmo_addr)
     except Exception as e:
         return jsonify({"error": f"osmosis balances: {e}"}), 500
+
+    # Log start
+    _append_hotwallet_log(
+        {
+            "action": "convert_usdc_to_arkeo",
+            "stage": "start",
+            "amount": amt_float,
+        }
+    )
 
     # Gas check
     osmo_gas = 0
@@ -1569,6 +1979,14 @@ def hotwallet_convert_usdc_to_arkeo():
     swap_code, swap_out = run_list(swap_cmd)
     swap_tx = _extract_txhash(swap_out)
     if swap_code != 0 or not swap_tx:
+        _append_hotwallet_log(
+            {
+                "action": "convert_usdc_to_arkeo",
+                "stage": "swap_failed",
+                "amount": amt_float,
+                "detail": swap_out,
+            }
+        )
         return jsonify(
             {
                 "error": "swap failed",
@@ -1584,8 +2002,17 @@ def hotwallet_convert_usdc_to_arkeo():
         m = re.search(r"txhash[:\s]+([0-9A-Fa-f]{64})", swap_out)
         if m:
             swap_tx = m.group(1)
-    ok, tx_log = _wait_for_osmo_tx_success(swap_tx, attempts=40, sleep_s=3)
+    ok, tx_log = _wait_for_osmo_tx_success(swap_tx, attempts=20, sleep_s=3)
     if not ok:
+        _append_hotwallet_log(
+            {
+                "action": "convert_usdc_to_arkeo",
+                "stage": "swap_not_included",
+                "amount": amt_float,
+                "swap_tx": swap_tx,
+                "raw_log": tx_log,
+            }
+        )
         return jsonify(
             {
                 "error": "swap failed on-chain or not included",
@@ -1610,7 +2037,19 @@ def hotwallet_convert_usdc_to_arkeo():
             break
     transfer_amt = arkeo_avail
     if transfer_amt <= 0:
+        _append_hotwallet_log(
+            {
+                "action": "convert_usdc_to_arkeo",
+                "stage": "no_arkeo_post_swap",
+                "swap_tx": swap_tx,
+            }
+        )
         return jsonify({"error": "no ARKEO available after swap", "swap_tx": swap_tx, "swap_out": swap_out}), 500
+
+    # Snapshot Arkeo balance before IBC to avoid racing with fast arrivals
+    start_arkeo_bal, start_err = _arkeo_balance(arkeo_addr)
+    if start_err:
+        return jsonify({"error": f"arkeo balance: {start_err}"}), 500
 
     ibc_cmd = [
         "osmosisd",
@@ -1642,6 +2081,14 @@ def hotwallet_convert_usdc_to_arkeo():
     ibc_code, ibc_out = run_list(ibc_cmd)
     ibc_tx = _extract_txhash(ibc_out)
     if ibc_code != 0 or not ibc_tx:
+        _append_hotwallet_log(
+            {
+                "action": "convert_usdc_to_arkeo",
+                "stage": "ibc_failed",
+                "swap_tx": swap_tx,
+                "detail": ibc_out,
+            }
+        )
         return jsonify(
             {
                 "error": "ibc transfer failed",
@@ -1652,14 +2099,36 @@ def hotwallet_convert_usdc_to_arkeo():
             }
         ), 500
 
-    # Poll Arkeo chain for arrival (best effort, with tolerance)
-    start_arkeo_bal, _ = _arkeo_balance(arkeo_addr)
-    arrived, arkeo_final = _wait_for_arkeo_balance_increase(
-        arkeo_addr, transfer_amt, tolerance_bps=ARRIVAL_TOLERANCE_BPS, attempts=40, sleep_s=5
+    # Briefly wait for Arkeo arrival (short window to avoid blocking UI too long)
+    _append_hotwallet_log(
+        {
+            "action": "convert_usdc_to_arkeo",
+            "stage": "waiting_arkeo",
+            "swap_tx": swap_tx,
+            "ibc_tx": ibc_tx,
+            "expected": transfer_amt,
+        }
+    )
+    arrived, arkeo_final, arkeo_poll_errors = _wait_for_arkeo_balance_increase(
+        arkeo_addr, transfer_amt, tolerance_bps=ARRIVAL_TOLERANCE_BPS, attempts=6, sleep_s=5, start_amt=start_arkeo_bal
     )
 
     # Persist discovered denoms
     _write_bridge_denoms(usdc_denom, arkeo_denom)
+
+    _append_hotwallet_log(
+        {
+            "action": "convert_usdc_to_arkeo",
+            "stage": "submitted",
+            "swap_tx": swap_tx,
+            "ibc_tx": ibc_tx,
+            "arkeo_start": start_arkeo_bal,
+            "arkeo_final": arkeo_final,
+            "arkeo_expected": transfer_amt,
+            "arrival_confirmed": arrived,
+            "arkeo_poll_errors": arkeo_poll_errors,
+        }
+    )
 
     return jsonify(
         {
@@ -1675,9 +2144,512 @@ def hotwallet_convert_usdc_to_arkeo():
             "arkeo_final": arkeo_final,
             "arkeo_expected": transfer_amt,
             "arrival_tolerance_bps": ARRIVAL_TOLERANCE_BPS,
+            "arkeo_poll_errors": arkeo_poll_errors,
         }
     )
 
+
+@app.post("/api/hotwallet/convert-arkeo-to-usdc")
+def hotwallet_convert_arkeo_to_usdc():
+    """
+    Swap Osmosis ARKEO -> USDC via pool 2977 (reverse direction).
+    Requires OSMO gas and ARKEO on Osmosis.
+    """
+    payload = request.get_json(silent=True) or {}
+    amount = payload.get("amount")
+    try:
+        amt_float = float(amount)
+    except Exception:
+        return jsonify({"error": "invalid amount"}), 400
+    if amt_float <= 0:
+        return jsonify({"error": "amount must be > 0"}), 400
+    amt_base = int(round(amt_float * 100_000_000))  # ARKEO on Osmosis uses 8 decimals
+
+    if not OSMOSIS_RPC:
+        return jsonify({"error": "OSMOSIS_RPC not configured"}), 400
+
+    # Ensure wallet
+    settings = _merge_subscriber_settings()
+    settings, osmo_err = _ensure_osmo_wallet(settings)
+    if osmo_err:
+        return jsonify({"error": f"osmo wallet: {osmo_err}"}), 400
+    osmo_addr = settings.get("OSMOSIS_ADDRESS")
+
+    # Balances
+    try:
+        balances = _osmosis_balances_raw(osmo_addr)
+    except Exception as e:
+        return jsonify({"error": f"osmosis balances: {e}"}), 500
+
+    # Gas check
+    osmo_gas = 0
+    for b in balances:
+        if b.get("denom") == "uosmo":
+            try:
+                osmo_gas = int(b.get("amount", "0"))
+            except Exception:
+                osmo_gas = 0
+            break
+    if osmo_gas < int(MIN_OSMO_GAS * 1_000_000):
+        return jsonify({"error": f"insufficient OSMO for gas (need >= {MIN_OSMO_GAS} OSMO)"}), 400
+
+    # Denoms
+    arkeo_denom = _discover_arkeo_osmo_denom(balances)
+    if not arkeo_denom:
+        return jsonify({"error": "ARKEO denom on Osmosis not found; ensure pool 2977 available"}), 400
+    usdc_denom_override = settings.get("USDC_OSMO_DENOM") or os.getenv("USDC_OSMO_DENOM") or ""
+    usdc_denom = usdc_denom_override or ""
+    usdc_avail = 0
+    if usdc_denom:
+        for b in balances:
+            if b.get("denom") == usdc_denom:
+                try:
+                    usdc_avail = int(b.get("amount", "0"))
+                except Exception:
+                    usdc_avail = 0
+                break
+    if not usdc_denom:
+        usdc_denom, usdc_avail = _pick_usdc_osmo_denom(balances)
+    if not usdc_denom:
+        return jsonify({"error": "USDC denom not found on Osmosis"}), 400
+
+    # ARKEO available
+    arkeo_avail = 0
+    for b in balances:
+        if b.get("denom") == arkeo_denom:
+            try:
+                arkeo_avail = int(b.get("amount", "0"))
+            except Exception:
+                arkeo_avail = 0
+            break
+    if arkeo_avail < amt_base:
+        return jsonify({"error": f"insufficient ARKEO (have {arkeo_avail/1e8:.8f}, need {amt_float:.8f})"}), 400
+
+    # Slippage: derive min out from quote (best-effort)
+    quote, qerr = _osmosis_quote_arkeo_to_usdc(amt_float)
+    if quote and quote.get("min_amount_out_base"):
+        min_out = int(quote.get("min_amount_out_base"))
+    else:
+        min_out = 1  # fallback
+
+    _append_hotwallet_log({"action": "convert_arkeo_to_usdc", "stage": "start", "amount": amt_float})
+
+    swap_cmd = [
+        "osmosisd",
+        "tx",
+        "gamm",
+        "swap-exact-amount-in",
+        f"{amt_base}{arkeo_denom}",
+        str(min_out),
+        "--broadcast-mode",
+        "sync",
+        "--swap-route-pool-ids",
+        "2977",
+        "--swap-route-denoms",
+        usdc_denom,
+        "--from",
+        settings.get("OSMOSIS_KEY_NAME") or OSMOSIS_KEY_NAME,
+        "--keyring-backend",
+        "test",
+        "--home",
+        settings.get("OSMOSIS_HOME") or OSMOSIS_HOME,
+        "--chain-id",
+        "osmosis-1",
+        "--node",
+        OSMOSIS_RPC,
+        "--gas",
+        "auto",
+        "--gas-adjustment",
+        "1.5",
+        "--gas-prices",
+        "0.035uosmo",
+        "-y",
+    ]
+    swap_code, swap_out = run_list(swap_cmd)
+    swap_tx = _extract_txhash(swap_out)
+    if swap_code != 0 or not swap_tx:
+        _append_hotwallet_log({"action": "convert_arkeo_to_usdc", "stage": "swap_failed", "detail": swap_out})
+        return jsonify({"error": "swap failed", "detail": swap_out, "swap_cmd": swap_cmd, "swap_exit": swap_code}), 500
+
+    ok, tx_log = _wait_for_osmo_tx_success(swap_tx, attempts=10, sleep_s=3)
+    if not ok:
+        _append_hotwallet_log({"action": "convert_arkeo_to_usdc", "stage": "swap_not_included", "swap_tx": swap_tx, "raw_log": tx_log})
+        return jsonify({"error": "swap failed on-chain or not included", "swap_tx": swap_tx, "swap_out": swap_out, "raw_log": tx_log}), 500
+
+    # Refresh balances and report USDC gained
+    try:
+        balances_after = _osmosis_balances_raw(osmo_addr)
+    except Exception:
+        balances_after = balances
+    usdc_before = usdc_avail
+    usdc_after = usdc_before
+    for b in balances_after:
+        if b.get("denom") == usdc_denom:
+            try:
+                usdc_after = int(b.get("amount", "0"))
+            except Exception:
+                usdc_after = usdc_before
+            break
+    usdc_delta = usdc_after - usdc_before
+
+    _append_hotwallet_log(
+        {
+            "action": "convert_arkeo_to_usdc",
+            "stage": "submitted",
+            "swap_tx": swap_tx,
+            "usdc_denom": usdc_denom,
+            "usdc_before": usdc_before,
+            "usdc_after": usdc_after,
+            "usdc_delta": usdc_delta,
+        }
+    )
+
+    return jsonify(
+        {
+            "status": "submitted",
+            "swap_tx": swap_tx,
+            "usdc_denom": usdc_denom,
+            "arkeo_denom": arkeo_denom,
+            "swap_cmd": _mask_cmd_sensitive(swap_cmd),
+            "usdc_before": usdc_before,
+            "usdc_after": usdc_after,
+            "usdc_delta": usdc_delta,
+        }
+    )
+
+
+@app.post("/api/hotwallet/convert-usdc-to-osmo")
+def hotwallet_convert_usdc_to_osmo():
+    """
+    Swap Osmosis USDC -> OSMO (to fund gas) via configured pool (default pool_id 678).
+    """
+    payload = request.get_json(silent=True) or {}
+    amount = payload.get("amount")
+    try:
+        amt_float = float(amount)
+    except Exception:
+        return jsonify({"error": "invalid amount"}), 400
+    if amt_float <= 0:
+        return jsonify({"error": "amount must be > 0"}), 400
+    if amt_float > 2.0:
+        return jsonify({"error": "amount too large for gas top-up (max 2 USDC)"}), 400
+    amt_base = int(round(amt_float * 1_000_000))  # USDC 6 decimals
+
+    if not OSMOSIS_RPC:
+        return jsonify({"error": "OSMOSIS_RPC not configured"}), 400
+
+    # Ensure wallet
+    settings = _merge_subscriber_settings()
+    settings, osmo_err = _ensure_osmo_wallet(settings)
+    if osmo_err:
+        return jsonify({"error": f"osmo wallet: {osmo_err}"}), 400
+    osmo_addr = settings.get("OSMOSIS_ADDRESS")
+
+    # Balances
+    try:
+        balances = _osmosis_balances_raw(osmo_addr)
+    except Exception as e:
+        return jsonify({"error": f"osmosis balances: {e}"}), 500
+
+    # USDC denom discovery
+    usdc_denom_override = settings.get("USDC_OSMO_DENOM") or os.getenv("USDC_OSMO_DENOM") or ""
+    usdc_denom = usdc_denom_override
+    usdc_avail = 0
+    if usdc_denom:
+        for b in balances:
+            if b.get("denom") == usdc_denom:
+                try:
+                    usdc_avail = int(b.get("amount", "0"))
+                except Exception:
+                    usdc_avail = 0
+                break
+    if not usdc_denom:
+        usdc_denom, usdc_avail = _pick_usdc_osmo_denom(balances)
+    if not usdc_denom:
+        return jsonify({"error": "USDC denom not found on Osmosis"}), 400
+    if usdc_avail < amt_base:
+        return jsonify({"error": f"insufficient USDC (have {usdc_avail/1e6:.6f}, need {amt_float:.6f})"}), 400
+
+    # Choose best pool
+    best_pool, best_meta = _pick_best_usdc_osmo_pool(usdc_denom)
+    pool_id = best_pool or USDC_OSMO_POOL_ID
+
+    # Slippage: derive min_out from quote if possible
+    quote, qerr = _osmosis_quote_usdc_to_osmo(amt_float)
+    min_out = 1
+    if quote and quote.get("min_amount_out_base"):
+        min_out = int(quote.get("min_amount_out_base"))
+
+    _append_hotwallet_log({"action": "convert_usdc_to_osmo", "stage": "start", "amount": amt_float})
+
+    swap_cmd = [
+        "osmosisd",
+        "tx",
+        "gamm",
+        "swap-exact-amount-in",
+        f"{amt_base}{usdc_denom}",
+        str(min_out),
+        "--broadcast-mode",
+        "sync",
+        "--swap-route-pool-ids",
+        str(pool_id),
+        "--swap-route-denoms",
+        "uosmo",
+        "--from",
+        settings.get("OSMOSIS_KEY_NAME") or OSMOSIS_KEY_NAME,
+        "--keyring-backend",
+        "test",
+        "--home",
+        settings.get("OSMOSIS_HOME") or OSMOSIS_HOME,
+        "--chain-id",
+        "osmosis-1",
+        "--node",
+        OSMOSIS_RPC,
+        "--gas",
+        "auto",
+        "--gas-adjustment",
+        "1.5",
+        "--gas-prices",
+        "0.035uosmo",
+        "-y",
+    ]
+    swap_code, swap_out = run_list(swap_cmd)
+    swap_tx = _extract_txhash(swap_out)
+    if swap_code != 0 or not swap_tx:
+        _append_hotwallet_log({"action": "convert_usdc_to_osmo", "stage": "swap_failed", "detail": swap_out})
+        return jsonify({"error": "swap failed", "detail": swap_out, "swap_cmd": swap_cmd, "swap_exit": swap_code}), 500
+
+    ok, tx_log = _wait_for_osmo_tx_success(swap_tx, attempts=10, sleep_s=3)
+    if not ok:
+        _append_hotwallet_log({"action": "convert_usdc_to_osmo", "stage": "swap_not_included", "swap_tx": swap_tx, "raw_log": tx_log})
+        return jsonify({"error": "swap failed on-chain or not included", "swap_tx": swap_tx, "swap_out": swap_out, "raw_log": tx_log}), 500
+
+    # Refresh balances and report OSMO gained
+    try:
+        balances_after = _osmosis_balances_raw(osmo_addr)
+    except Exception:
+        balances_after = balances
+    osmo_before = 0
+    osmo_after = 0
+    for b in balances:
+        if b.get("denom") == "uosmo":
+            try:
+                osmo_before = int(b.get("amount", "0"))
+            except Exception:
+                osmo_before = 0
+            break
+    for b in balances_after:
+        if b.get("denom") == "uosmo":
+            try:
+                osmo_after = int(b.get("amount", "0"))
+            except Exception:
+                osmo_after = osmo_before
+            break
+    osmo_delta = osmo_after - osmo_before
+
+    _append_hotwallet_log(
+        {
+            "action": "convert_usdc_to_osmo",
+            "stage": "submitted",
+            "swap_tx": swap_tx,
+            "usdc_denom": usdc_denom,
+            "osmo_before": osmo_before,
+            "osmo_after": osmo_after,
+            "osmo_delta": osmo_delta,
+            "pool_id": pool_id,
+            "pool_meta": best_meta or {},
+        }
+    )
+
+    return jsonify(
+        {
+            "status": "submitted",
+            "swap_tx": swap_tx,
+            "usdc_denom": usdc_denom,
+            "osmo_before": osmo_before,
+            "osmo_after": osmo_after,
+            "osmo_delta": osmo_delta,
+            "swap_cmd": _mask_cmd_sensitive(swap_cmd),
+        }
+    )
+
+
+@app.post("/api/hotwallet/arkeo-to-native")
+def hotwallet_arkeo_to_native():
+    """
+    IBC transfer ARKEO (wrapped on Osmosis) to native ARKEO on Arkeo chain.
+    """
+    payload = request.get_json(silent=True) or {}
+    amount = payload.get("amount")
+    try:
+        amt_float = float(amount)
+    except Exception:
+        return jsonify({"error": "invalid amount"}), 400
+    if amt_float <= 0:
+        return jsonify({"error": "amount must be > 0"}), 400
+    amt_base = int(round(amt_float * 100_000_000))  # ARKEO 8 decimals on Osmosis
+
+    if not OSMOSIS_RPC:
+        return jsonify({"error": "OSMOSIS_RPC not configured"}), 400
+    if not OSMO_TO_ARKEO_CHANNEL:
+        return jsonify({"error": "OSMO_TO_ARKEO_CHANNEL not configured"}), 400
+
+    settings = _merge_subscriber_settings()
+    settings, osmo_err = _ensure_osmo_wallet(settings)
+    settings, arkeo_err = _ensure_arkeo_mnemonic(settings)
+    if osmo_err:
+        return jsonify({"error": f"osmo wallet: {osmo_err}"}), 400
+    if arkeo_err:
+        return jsonify({"error": f"arkeo wallet: {arkeo_err}"}), 400
+    osmo_addr = settings.get("OSMOSIS_ADDRESS")
+    arkeo_addr, addr_err = derive_address(KEY_NAME, KEYRING)
+    if addr_err:
+        return jsonify({"error": f"arkeo address: {addr_err}"}), 400
+
+    try:
+        balances = _osmosis_balances_raw(osmo_addr)
+    except Exception as e:
+        return jsonify({"error": f"osmosis balances: {e}"}), 500
+
+    # Gas check
+    osmo_gas = 0
+    for b in balances:
+        if b.get("denom") == "uosmo":
+            try:
+                osmo_gas = int(b.get("amount", "0"))
+            except Exception:
+                osmo_gas = 0
+            break
+    if osmo_gas < int(MIN_OSMO_GAS * 1_000_000):
+        return jsonify({"error": f"insufficient OSMO for gas (need >= {MIN_OSMO_GAS} OSMO)"}), 400
+
+    # ARKEO denom and balance
+    arkeo_denom = _discover_arkeo_osmo_denom(balances)
+    if not arkeo_denom:
+        return jsonify({"error": "ARKEO denom on Osmosis not found"}), 400
+    arkeo_avail = 0
+    for b in balances:
+        if b.get("denom") == arkeo_denom:
+            try:
+                arkeo_avail = int(b.get("amount", "0"))
+            except Exception:
+                arkeo_avail = 0
+            break
+    if arkeo_avail < amt_base:
+        return jsonify({"error": f"insufficient ARKEO (have {arkeo_avail/1e8:.8f}, need {amt_float:.8f})"}), 400
+
+    _append_hotwallet_log({"action": "arkeo_to_native", "stage": "start", "amount": amt_float})
+
+    ibc_cmd = [
+        "osmosisd",
+        "tx",
+        "ibc-transfer",
+        "transfer",
+        "transfer",
+        OSMO_TO_ARKEO_CHANNEL,
+        arkeo_addr,
+        f"{amt_base}{arkeo_denom}",
+        "--from",
+        settings.get("OSMOSIS_KEY_NAME") or OSMOSIS_KEY_NAME,
+        "--keyring-backend",
+        "test",
+        "--home",
+        settings.get("OSMOSIS_HOME") or OSMOSIS_HOME,
+        "--chain-id",
+        "osmosis-1",
+        "--node",
+        OSMOSIS_RPC,
+        "--gas",
+        "auto",
+        "--gas-adjustment",
+        "1.5",
+        "--gas-prices",
+        "0.025uosmo",
+        "--broadcast-mode",
+        "sync",
+        "-y",
+    ]
+    ibc_code, ibc_out = run_list(ibc_cmd)
+    ibc_tx = _extract_txhash(ibc_out)
+    packet_info = None
+    try:
+        packet_info = _parse_send_packet(json.loads(ibc_out) if ibc_out else {})
+    except Exception:
+        packet_info = None
+    # Fallback: query tx to pull packet info if not present
+    if ibc_tx and not packet_info:
+        try:
+            tx_json_raw = run_list(
+                [
+                    "osmosisd",
+                    "query",
+                    "tx",
+                    ibc_tx,
+                    "--node",
+                    OSMOSIS_RPC,
+                    "-o",
+                    "json",
+                ]
+            )[1]
+            packet_info = _parse_send_packet(json.loads(tx_json_raw))
+        except Exception:
+            packet_info = None
+    if ibc_code != 0 or not ibc_tx:
+        _append_hotwallet_log({"action": "arkeo_to_native", "stage": "ibc_failed", "detail": ibc_out})
+        return (
+            jsonify(
+                {
+                    "error": "ibc transfer failed",
+                    "detail": ibc_out,
+                    "raw_log": ibc_out,
+                    "ibc_cmd": ibc_cmd,
+                    "ibc_exit": ibc_code,
+                }
+            ),
+            500,
+        )
+
+    start_arkeo_bal, _ = _arkeo_balance(arkeo_addr)
+    arrived, arkeo_final, arkeo_poll_errors = _wait_for_arkeo_balance_increase(
+        arkeo_addr, amt_base, tolerance_bps=ARRIVAL_TOLERANCE_BPS, attempts=6, sleep_s=5, start_amt=start_arkeo_bal
+    )
+
+    _append_hotwallet_log(
+        {
+            "action": "arkeo_to_native",
+            "stage": "submitted",
+            "ibc_tx": ibc_tx,
+            "osmo_tx": ibc_tx,
+            "packet_sequence": packet_info.get("packet_sequence") if packet_info else None,
+            "osmo_src_channel": packet_info.get("src_channel") if packet_info else None,
+            "arkeo_dst_channel": packet_info.get("dst_channel") if packet_info else None,
+            "packet_info_found": bool(packet_info),
+            "arkeo_start": start_arkeo_bal,
+            "arkeo_final": arkeo_final,
+            "arkeo_expected": amt_base,
+            "arrival_confirmed": arrived,
+            "arkeo_poll_errors": arkeo_poll_errors,
+        }
+    )
+
+    return jsonify(
+        {
+            "status": "submitted",
+            "ibc_tx": ibc_tx,
+            "osmo_tx": ibc_tx,
+            "packet_sequence": packet_info.get("packet_sequence") if packet_info else None,
+            "osmo_src_channel": packet_info.get("src_channel") if packet_info else None,
+            "arkeo_dst_channel": packet_info.get("dst_channel") if packet_info else None,
+            "packet_info_found": bool(packet_info),
+            "arkeo_denom": arkeo_denom,
+            "arkeo_start": start_arkeo_bal,
+            "arkeo_final": arkeo_final,
+            "arkeo_expected": amt_base,
+            "arrival_confirmed": arrived,
+            "arkeo_poll_errors": arkeo_poll_errors,
+            "ibc_cmd": _mask_cmd_sensitive(ibc_cmd),
+        }
+    )
 
 
 CAST_BIN = _pick_executable("cast", ["/usr/local/bin/cast", "/root/.foundry/bin/cast"])
@@ -1706,6 +2678,7 @@ DEFAULT_OSMOSIS_USDC_DENOMS = [
     # Known wrapped USDC (channel-750) provided
     "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4",
 ]
+USDC_OSMO_POOL_ID = os.getenv("USDC_OSMO_POOL_ID") or "678"  # fallback pool for USDC<->OSMO swaps (override if needed)
 _env_osmo_denoms = [d.strip() for d in (os.getenv("OSMOSIS_USDC_DENOMS") or "").split(",") if d.strip()]
 OSMOSIS_USDC_DENOMS = _env_osmo_denoms if _env_osmo_denoms else DEFAULT_OSMOSIS_USDC_DENOMS.copy()
 MIN_OSMO_GAS = _safe_float(os.getenv("MIN_OSMO_GAS") or 0.1, 0.1)
@@ -2998,6 +3971,40 @@ def osmosis_quote_usdc_to_arkeo():
         return jsonify({"error": err}), 400
     return jsonify(quote or {})
 
+@app.post("/api/osmosis-quote-usdc-to-osmo")
+def osmosis_quote_usdc_to_osmo():
+    """Return swap quote for USDC -> OSMO using pool 678."""
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+    amt = data.get("amount") or data.get("usdc") or data.get("amt")
+    try:
+        amt_f = float(amt)
+    except Exception:
+        return jsonify({"error": "invalid amount"}), 400
+    quote, err = _osmosis_quote_usdc_to_osmo(amt_f)
+    if err:
+        return jsonify({"error": err}), 400
+    return jsonify(quote or {})
+
+@app.post("/api/osmosis-quote-arkeo-to-usdc")
+def osmosis_quote_arkeo_to_usdc():
+    """Return swap quote for ARKEO -> USDC using pool 2977."""
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+    amt = data.get("amount") or data.get("arkeo") or data.get("amt")
+    try:
+        amt_f = float(amt)
+    except Exception:
+        return jsonify({"error": "invalid amount"}), 400
+    quote, err = _osmosis_quote_arkeo_to_usdc(amt_f)
+    if err:
+        return jsonify({"error": err}), 400
+    return jsonify(quote or {})
+
 
 @app.get("/api/key")
 def get_key():
@@ -4201,6 +5208,40 @@ def _write_listeners(data: dict) -> None:
     cache_ensure_cache_dir()
     path = LISTENERS_FILE
     tmp_path = f"{path}.tmp.{os.getpid()}.{int(time.time() * 1000)}"
+    lock_path = f"{path}.lock"
+    lock_fh = None
+    # Acquire simple file lock to avoid concurrent writers corrupting JSON
+    try:
+        import fcntl  # POSIX-only; acceptable in this environment
+
+        lock_fh = open(lock_path, "w")
+        deadline = time.time() + 3.0  # 3s timeout
+        while True:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    try:
+                        print(f"[listeners] write lock timeout for {path}")
+                    except Exception:
+                        pass
+                    if lock_fh:
+                        lock_fh.close()
+                    return
+                time.sleep(0.05)
+    except Exception as e:
+        try:
+            print(f"[listeners] lock acquire failed: {e}")
+        except Exception:
+            pass
+        if lock_fh:
+            try:
+                lock_fh.close()
+            except Exception:
+                pass
+        # proceed without lock to avoid total failure, but still attempt write
+        lock_fh = None
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=True, indent=2)
@@ -4211,12 +5252,28 @@ def _write_listeners(data: dict) -> None:
             print(f"[listeners] wrote {path} (tmp={tmp_path})")
         except Exception:
             pass
-    except OSError:
+    except OSError as e:
+        try:
+            print(f"[listeners] write failed: {e}")
+        except Exception:
+            pass
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except OSError:
             pass
+    finally:
+        if lock_fh:
+            try:
+                import fcntl as _fcntl  # already imported; guard if missing
+
+                _fcntl.flock(lock_fh, _fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_fh.close()
+            except Exception:
+                pass
 
 
 def _normalize_top_services(entries) -> list[dict]:
