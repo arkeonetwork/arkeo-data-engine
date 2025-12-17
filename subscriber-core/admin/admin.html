@@ -74,10 +74,6 @@
     <div class="row-between align-center">
         <div class="inline">
             <h2 class="mt-0 mb-0">Subscriber Settings</h2>
-            <div class="hint">Values formerly stored in subscriber.env. Update and save here.</div>
-        </div>
-        <div class="actions">
-            <button class="primary" type="submit" form="subscriberSettingsForm">Save Settings</button>
         </div>
     </div>
     <form id="subscriberSettingsForm" onsubmit="saveSubscriberSettings(event)">
@@ -139,7 +135,7 @@
         <tr>
             <td class="label">
                 Arkeo Hot Wallet Mnemonic
-                <div class="hint">Stored for on-chain Arkeo operations (not used for Osmosis/Keplr).</div>
+                <div class="hint">Stored for on-chain Arkeo operations.</div>
             </td>
             <td class="value"><textarea id="hotwalletMnemonic" rows="3"></textarea></td>
         </tr>
@@ -166,15 +162,10 @@
         </tr>
         <tr>
             <td class="label">
-                Allow Localhost Sentinel URIs
-                <div class="hint">Permit active providers whose metadata points at localhost/127.* sentinel URIs.</div>
+                Wallet Sync Interval (seconds)
+                <div class="hint">How often to refresh wallet info/balances. Set to 0 to disable.</div>
             </td>
-            <td class="value">
-                <label class="inline">
-                    <input type="checkbox" id="allowLocalhostSentinel" />
-                    <span>Allow localhost sentinel URIs</span>
-                </label>
-            </td>
+            <td class="value"><input type="number" id="walletSyncInterval" placeholder="15" min="0" step="1" /></td>
         </tr>
         <tr>
             <td class="label">
@@ -188,7 +179,12 @@
             <td class="value"><div id="subscriberPubkeyDisplay" class="muted">(loading...)</div></td>
         </tr>
     </table>
-    <div id="subscriberSettingsResult" class="muted" aria-live="polite"></div>
+    <div class="row-between align-center mt-12">
+        <div class="actions">
+            <button class="primary" type="submit" form="subscriberSettingsForm">Save Settings</button>
+        </div>
+        <div id="subscriberSettingsResult" class="muted" aria-live="polite"></div>
+    </div>
     </form>
 </div>
 
@@ -440,6 +436,7 @@
         ADMIN_PORT: "8079",
         ADMIN_API_PORT: "9998",
         CACHE_FETCH_INTERVAL: "150",
+        WALLET_SYNC_INTERVAL: "15",
     };
 
     function setInputWithDefault(id, val, fallbackKey) {
@@ -492,12 +489,7 @@
             setInputWithDefault("adminPort", subscriberSettingsCache.ADMIN_PORT, "ADMIN_PORT");
             setInputWithDefault("adminApiPort", subscriberSettingsCache.ADMIN_API_PORT, "ADMIN_API_PORT");
             setInputWithDefault("cacheFetchInterval", subscriberSettingsCache.CACHE_FETCH_INTERVAL, "CACHE_FETCH_INTERVAL");
-            const allowLocalhost = subscriberSettingsCache.ALLOW_LOCALHOST_SENTINEL_URIS;
-            const allowLocalhostEl = document.getElementById("allowLocalhostSentinel");
-            if (allowLocalhostEl) {
-                const val = String(allowLocalhost || "").toLowerCase();
-                allowLocalhostEl.checked = val === "1" || val === "true" || val === "yes" || val === "on";
-            }
+            setInputWithDefault("walletSyncInterval", subscriberSettingsCache.WALLET_SYNC_INTERVAL, "WALLET_SYNC_INTERVAL");
             const pubEl = document.getElementById("subscriberPubkeyDisplay");
             const pubkey = data.pubkey && data.pubkey.bech32 ? data.pubkey.bech32 : "";
             if (pubEl) pubEl.textContent = pubkey ? pubkey : "(unavailable)";
@@ -537,7 +529,7 @@
                 ADMIN_PORT: document.getElementById("adminPort")?.value || DEFAULTS.ADMIN_PORT,
                 ADMIN_API_PORT: document.getElementById("adminApiPort")?.value || DEFAULTS.ADMIN_API_PORT,
                 CACHE_FETCH_INTERVAL: document.getElementById("cacheFetchInterval")?.value || DEFAULTS.CACHE_FETCH_INTERVAL,
-                ALLOW_LOCALHOST_SENTINEL_URIS: document.getElementById("allowLocalhostSentinel")?.checked ? "1" : "0"
+                WALLET_SYNC_INTERVAL: document.getElementById("walletSyncInterval")?.value || DEFAULTS.WALLET_SYNC_INTERVAL
             },
         };
         const adminPasswordVal = document.getElementById("adminPasswordInput")?.value || "";

@@ -143,17 +143,19 @@ export async function signAndBroadcastIbcTransfer(opts: IbcTransferOptions) {
     const client = await ensureClient({ chainId, rpcEndpoint: opts.rpcEndpoint });
     const addr = opts.senderAddress || cachedAddress || (await connectKeplr(opts));
     const timeoutSeconds = opts.timeoutSeconds ?? 300;
-    const timeoutTimestamp = BigInt(Date.now()) * 1_000_000n + BigInt(timeoutSeconds) * 1_000_000_000n;
-    const msg = osmosis.ibc.applications.transfer.v1.MessageComposer.withTypeUrl.transfer({
-        sender: addr,
-        receiver: opts.receiver,
-        sourceChannel: opts.sourceChannel,
-        sourcePort: opts.sourcePort || "transfer",
-        token: { denom: opts.denom, amount: normalizeAmount(opts.amountBase) },
-        timeoutTimestamp,
-    });
     const fee = calculateFee(opts.gas || DEFAULT_IBC_GAS, GasPrice.fromString(opts.gasPrice || DEFAULT_GAS_PRICE));
-    const result = await client.signAndBroadcast(addr, [msg], fee, opts.memo || "");
+    const timeoutTimestamp = BigInt(Date.now()) * 1_000_000n + BigInt(timeoutSeconds) * 1_000_000_000n;
+    const result = await client.sendIbcTokens(
+        addr,
+        opts.receiver,
+        { denom: opts.denom, amount: normalizeAmount(opts.amountBase) },
+        opts.sourcePort || "transfer",
+        opts.sourceChannel,
+        undefined,
+        timeoutTimestamp,
+        fee,
+        opts.memo || "",
+    );
     if (result.code !== 0) {
         throw new Error(result.rawLog || `ibc transfer failed (code ${result.code})`);
     }

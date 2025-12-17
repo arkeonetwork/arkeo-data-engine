@@ -1085,7 +1085,9 @@
         }
     }
 
+    let convertArkeoQuoteReqId = 0;
     async function fetchConvertArkeoQuote() {
+        const reqId = ++convertArkeoQuoteReqId;
         const estEl = document.getElementById("convertArkeoEst");
         const note = document.getElementById("convertArkeoPriceNote");
         const amtInput = document.getElementById("convertArkeoAmount");
@@ -1106,9 +1108,11 @@
             const text = await resp.text();
             let data = {};
             try { data = JSON.parse(text); } catch (e) { data = { error: text || "Quote failed" }; }
+            // Ignore stale responses if a newer request started after this one
+            if (reqId !== convertArkeoQuoteReqId) return;
             if (!resp.ok || data.error) {
                 if (estEl) estEl.textContent = "—";
-                if (note) note.textContent = data?.error ? `Quote failed: ${data.error}` : `Quote failed: ${text}`;
+                if (note) note.textContent = data?.error ? `Quote failed: ${data.error}` : `Quote failed`;
                 setConvertArkeoButtonEnabled(false);
                 return;
             }
@@ -1378,7 +1382,7 @@
         setConvertArkeoToOsmosisButtonEnabled(enable);
         const estBox = document.getElementById("convertArkeoToOsmosisEst");
         if (estBox) {
-            estBox.textContent = enable ? `${amt.toFixed(6)} ARKEO` : "—";
+            estBox.textContent = enable ? `${amt.toFixed(8)} ARKEO` : "—";
         }
     }
 
@@ -1502,7 +1506,7 @@
             return;
         }
         setConvertArkeoToOsmosisButtonEnabled(false);
-        appendConvertArkeoToOsmosisLog(`Submitting IBC transfer of ${amt.toFixed(6)} ARKEO...`);
+        appendConvertArkeoToOsmosisLog(`Submitting IBC transfer of ${amt.toFixed(8)} ARKEO...`);
         if (convertArkeoToOsmosisWaitTimer) {
             clearInterval(convertArkeoToOsmosisWaitTimer);
             convertArkeoToOsmosisWaitTimer = null;
@@ -1514,7 +1518,10 @@
             const resp = await fetch(apiUrl("/api/hotwallet/arkeo-to-osmosis"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ amount: amt.toFixed(6) }),
+                body: JSON.stringify({
+                    amount: amt.toFixed(8),
+                    osmosis_address: keplrOsmoAddress || "",
+                }),
             });
             const data = await resp.json();
             if (convertArkeoToOsmosisWaitTimer) {
@@ -1587,59 +1594,46 @@
             appendConvertArkeoNativeLog("Waiting for IBC... still working.");
         }, 10000);
         try {
-            const resp = await fetch(apiUrl("/api/hotwallet/arkeo-to-native"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ amount: amt.toFixed(8) }),
-            });
-            let data = null;
-            let bodyText = "";
+            const cfgRes = await fetch(apiUrl("/api/osmosis-arkeo-config"), { cache: "no-store" });
+            const cfgText = await cfgRes.text();
+            let cfg = {};
             try {
-                bodyText = await resp.text();
-                if (bodyText) data = JSON.parse(bodyText);
+                cfg = JSON.parse(cfgText || "{}");
             } catch (e) {
-                data = null;
+                throw new Error(`config parse failed (${cfgRes.status}): ${cfgText?.slice(0, 120) || "no body"}`);
             }
+            if (!cfgRes.ok) {
+                const errMsg = cfg?.error || cfgRes.statusText || cfgRes.status;
+                throw new Error(`config fetch failed: ${errMsg}`);
+            }
+            const rpc = cfg.osmosis_rpc;
+            const channel = cfg.source_channel || "channel-103074";
+            const port = cfg.source_port || "transfer";
+            const denom = cfg.arkeo_denom || "ibc/AD969E97A63B64B30A6E4D9F598341A403B849F5ACFEAA9F18DBD9255305EC65";
+            const receiver = cfg.arkeo_address || (document.getElementById("walletArkeoAddress")?.textContent || "").trim();
+            if (!rpc) throw new Error("Osmosis RPC missing");
+            if (!receiver) throw new Error("Arkeo address missing");
+            const { signAndBroadcastIbcTransfer, connectKeplr } = getCosmosBundle();
+            const addr = await connectKeplr({ chainId: "osmosis-1", rpcEndpoint: rpc });
+            if (!keplrOsmoAddress) keplrOsmoAddress = addr;
+            const res = await signAndBroadcastIbcTransfer({
+                chainId: "osmosis-1",
+                rpcEndpoint: rpc,
+                senderAddress: keplrOsmoAddress,
+                receiver,
+                denom,
+                amountBase: (amt * 1e8).toFixed(0),
+                sourceChannel: channel,
+                sourcePort: port,
+                gas: 250000,
+            });
             if (convertArkeoNativeWaitTimer) {
                 clearInterval(convertArkeoNativeWaitTimer);
                 convertArkeoNativeWaitTimer = null;
             }
-            if (!resp.ok) {
-                const errMsg = (data && (data.error || data.detail)) || bodyText || resp.statusText || resp.status;
-                appendConvertArkeoNativeLog(`Convert failed: ${errMsg}`);
-                if (data && data.ibc_tx) appendConvertArkeoNativeLog(`IBC tx: ${data.ibc_tx}`);
-                if (data && data.osmo_tx) appendConvertArkeoNativeLog(`Osmosis tx: ${data.osmo_tx}`);
-                if (data && data.raw_log) appendConvertArkeoNativeLog(`IBC raw log: ${data.raw_log}`);
-                if (data && data.detail && !data.raw_log) appendConvertArkeoNativeLog(`IBC detail: ${data.detail}`);
-                if (data && data.ibc_cmd) appendConvertArkeoNativeLog(`IBC cmd: ${JSON.stringify(data.ibc_cmd)}`);
-                setConvertArkeoNativeButtonEnabled(true);
-                if (btn) btn.disabled = false;
-                return;
-            }
-            if (!data) {
-                appendConvertArkeoNativeLog("Convert failed: empty response from server.");
-                setConvertArkeoNativeButtonEnabled(true);
-                if (btn) btn.disabled = false;
-                return;
-            }
-            if (data.ibc_tx) appendConvertArkeoNativeLog(`IBC tx: ${data.ibc_tx}`);
-            if (data.osmo_tx) appendConvertArkeoNativeLog(`Osmosis tx: ${data.osmo_tx}`);
-            if (data.osmo_tx_code !== undefined) appendConvertArkeoNativeLog(`Osmosis tx code: ${data.osmo_tx_code}`);
-            if (data.osmo_tx_raw_log) appendConvertArkeoNativeLog(`Osmosis raw log: ${data.osmo_tx_raw_log}`);
-            if (data.packet_sequence) {
-                appendConvertArkeoNativeLog(
-                    `IBC packet seq=${data.packet_sequence} src=${data.osmo_src_channel || "-"} dst=${data.arkeo_dst_channel || "-"}`
-                );
-            } else if (data.packet_info_found === false) {
-                appendConvertArkeoNativeLog("Packet info unavailable (will need to trace by tx events).");
-            }
-            if (data.arrival_confirmed) {
-                appendConvertArkeoNativeLog("IBC complete: ARKEO arrived on native chain.");
-                setTimeout(() => closeConvertArkeoNativeModal(), 2500);
-            } else {
-                appendConvertArkeoNativeLog("Transfer submitted. Check Status for arrival updates.");
-                setTimeout(() => closeConvertArkeoNativeModal(), 3000);
-            }
+            appendConvertArkeoNativeLog(`IBC submitted: tx ${res.transactionHash}`);
+            appendConvertArkeoNativeLog("Transfer submitted. Arrival pending on Arkeo chain.");
+            setTimeout(() => closeConvertArkeoNativeModal(), 3000);
             refreshHeader();
         } catch (err) {
             appendConvertArkeoNativeLog(`Error: ${err}`);
@@ -1881,6 +1875,8 @@
     let portFloorGlobal = 62001;
     let serviceMenuOpen = false;
     let hotWalletsOpen = false;
+    const DEFAULT_WALLET_SYNC_MS = 15000;
+    let walletRefreshTimer = null;
     const walletEls = {
         eth: { bal: "walletEthBalance", addr: "walletEthAddress" },
         osmo: { bal: "walletOsmoBalance", addr: "walletOsmoAddress" },
@@ -2329,6 +2325,39 @@
         return true;
     }
 
+    function scheduleWalletRefresh(intervalMs) {
+        try {
+            if (walletRefreshTimer) {
+                clearInterval(walletRefreshTimer);
+                walletRefreshTimer = null;
+            }
+            if (intervalMs > 0) {
+                walletRefreshTimer = setInterval(refreshHeader, intervalMs);
+            }
+        } catch (e) {
+            console.warn("scheduleWalletRefresh failed", e);
+        }
+    }
+
+    async function configureWalletRefreshInterval() {
+        let intervalMs = DEFAULT_WALLET_SYNC_MS;
+        try {
+            const res = await fetch(apiUrl("/api/subscriber-settings"), { cache: "no-store" });
+            if (res && res.ok) {
+                const data = await res.json().catch(() => ({}));
+                const settings = (data && data.settings) || {};
+                const raw = settings.WALLET_SYNC_INTERVAL ?? settings.wallet_sync_interval ?? settings.WALLET_REFRESH_INTERVAL;
+                const parsed = parseInt(raw, 10);
+                if (Number.isFinite(parsed) && parsed >= 0) {
+                    intervalMs = parsed * 1000;
+                }
+            }
+        } catch (e) {
+            console.warn("configureWalletRefreshInterval: falling back to default", e);
+        }
+        scheduleWalletRefresh(intervalMs);
+    }
+
     document.addEventListener("DOMContentLoaded", async () => {
         await fetchAdminPasswordStatus(true);
         const ok = await ensureSubscriberSettingsExists();
@@ -2337,8 +2366,8 @@
         setHotWalletState(false);
         refreshHeader();
         try { registerKeplrKeystoreChange(); } catch (err) { console.warn("Keplr listener not attached", err); }
-        // Refresh every 15 seconds to mirror provider UI behavior
-        setInterval(refreshHeader, 15000);
+        // Refresh wallet/header on the configured cadence (default 15s)
+        await configureWalletRefreshInterval();
         loadListeners();
         // Keep listener table/logs fresh for dashboard view; skip while editing to avoid clobbering form state
         setInterval(() => { if (!listenersEditingId) loadListeners(); }, 5000);
@@ -3536,13 +3565,16 @@
         try {
             const res = await fetch(url, { cache: "no-store" });
             const data = await res.json().catch(() => ({}));
-            const pre = document.getElementById("statusPre");
-            const pretty = JSON.stringify(data, null, 2);
-            if (pre) {
-                pre.textContent = pretty;
-            } else {
-                updateModalBodyHtml(`${header}<pre class="mono" style="max-height:50vh;overflow:auto;">${escapeHtml(pretty)}</pre>`);
-            }
+            const provider = data?.provider_pubkey || data?.active_contract?.provider || "—";
+            const contractObj = data?.active_contract || {};
+            const contractCfg = data?.contract_config || {};
+            const minimal = {
+                provider_pubkey: provider,
+                contract: contractObj,
+                contract_config: contractCfg,
+            };
+            const pretty = escapeHtml(JSON.stringify(minimal, null, 2));
+            updateModalBodyHtml(`${header}<pre class="mono" style="max-height:50vh;overflow:auto;">${pretty}</pre>`);
         } catch (e) {
             const pre = document.getElementById("statusPre");
             const msg = `Failed to fetch status:\n${e}`;

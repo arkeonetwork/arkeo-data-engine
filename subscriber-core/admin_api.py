@@ -532,22 +532,41 @@ def hotwallet_topup_gas():
 # ---------- Osmosis USDC -> ARKEO swap + IBC (Gravity-less path) ----------
 def _osmosis_balances_raw(addr: str) -> list[dict]:
     """Return raw balances list for an Osmosis address."""
-    cmd = [
-        "osmosisd",
-        "query",
-        "bank",
-        "balances",
-        addr,
-        "--node",
-        OSMOSIS_RPC,
-        "--output",
-        "json",
-    ]
-    code, out = run_list(cmd)
-    if code != 0:
-        raise RuntimeError(f"osmosis balances exit={code}: {out}")
-    data = json.loads(out)
-    return data.get("balances") or data.get("result") or []
+    def _via_osmosisd() -> list[dict]:
+        cmd = [
+            "osmosisd",
+            "query",
+            "bank",
+            "balances",
+            addr,
+            "--node",
+            OSMOSIS_RPC,
+            "--output",
+            "json",
+        ]
+        code, out = run_list(cmd)
+        if code != 0:
+            raise RuntimeError(f"osmosis balances exit={code}: {out}")
+        data = json.loads(out)
+        return data.get("balances") or data.get("result") or []
+
+    def _via_rest_fallback() -> list[dict]:
+        # use public rest fallback to avoid payg/proxy issues
+        url = f"https://rest.cosmos.directory/osmosis/cosmos/bank/v1beta1/balances/{addr}"
+        code, out = run_list(["curl", "-s", url])
+        if code != 0:
+            raise RuntimeError(f"osmosis balances rest exit={code}: {out}")
+        data = json.loads(out)
+        return data.get("balances") or data.get("result") or []
+
+    try:
+        return _via_osmosisd()
+    except Exception as e:
+        # fallback to public REST if local/proxied osmosisd fails
+        try:
+            return _via_rest_fallback()
+        except Exception:
+            raise e
 
 
 def _load_osmo_cache() -> dict:
@@ -1791,214 +1810,6 @@ def hotwallet_convert_arkeo_to_usdc():
 
 
 
-@app.post("/api/hotwallet/arkeo-to-native")
-def hotwallet_arkeo_to_native():
-    """
-    IBC transfer ARKEO (wrapped on Osmosis) to native ARKEO on Arkeo chain.
-    """
-    payload = request.get_json(silent=True) or {}
-    amount = payload.get("amount")
-    try:
-        amt_float = float(amount)
-    except Exception:
-        return jsonify({"error": "invalid amount"}), 400
-    if amt_float <= 0:
-        return jsonify({"error": "amount must be > 0"}), 400
-    amt_base = int(round(amt_float * 100_000_000))  # ARKEO 8 decimals on Osmosis
-
-    if not OSMOSIS_RPC:
-        return jsonify({"error": "OSMOSIS_RPC not configured"}), 400
-    if not OSMO_TO_ARKEO_CHANNEL:
-        return jsonify({"error": "OSMO_TO_ARKEO_CHANNEL not configured"}), 400
-
-    settings = _merge_subscriber_settings()
-    settings, osmo_err = _ensure_osmo_wallet(settings)
-    settings, arkeo_err = _ensure_arkeo_mnemonic(settings)
-    if osmo_err:
-        return jsonify({"error": f"osmo wallet: {osmo_err}"}), 400
-    if arkeo_err:
-        return jsonify({"error": f"arkeo wallet: {arkeo_err}"}), 400
-    osmo_addr = settings.get("OSMOSIS_ADDRESS")
-    arkeo_addr, addr_err = derive_address(KEY_NAME, KEYRING)
-    if addr_err:
-        return jsonify({"error": f"arkeo address: {addr_err}"}), 400
-
-    try:
-        balances = _osmosis_balances_raw(osmo_addr)
-    except Exception as e:
-        return jsonify({"error": f"osmosis balances: {e}"}), 500
-
-    # Gas check
-    osmo_gas = 0
-    for b in balances:
-        if b.get("denom") == "uosmo":
-            try:
-                osmo_gas = int(b.get("amount", "0"))
-            except Exception:
-                osmo_gas = 0
-            break
-    if osmo_gas < int(MIN_OSMO_GAS * 1_000_000):
-        return jsonify({"error": f"insufficient OSMO for gas (need >= {MIN_OSMO_GAS} OSMO)"}), 400
-
-    # ARKEO denom and balance
-    arkeo_denom = _discover_arkeo_osmo_denom(balances)
-    if not arkeo_denom:
-        return jsonify({"error": "ARKEO denom on Osmosis not found"}), 400
-    arkeo_avail = 0
-    for b in balances:
-        if b.get("denom") == arkeo_denom:
-            try:
-                arkeo_avail = int(b.get("amount", "0"))
-            except Exception:
-                arkeo_avail = 0
-            break
-    if arkeo_avail < amt_base:
-        return jsonify({"error": f"insufficient ARKEO (have {arkeo_avail/1e8:.8f}, need {amt_float:.8f})"}), 400
-
-    _append_hotwallet_log({"action": "arkeo_to_native", "stage": "start", "amount": amt_float})
-
-    ibc_cmd = [
-        "osmosisd",
-        "tx",
-        "ibc-transfer",
-        "transfer",
-        "transfer",
-        OSMO_TO_ARKEO_CHANNEL,
-        arkeo_addr,
-        f"{amt_base}{arkeo_denom}",
-        "--from",
-        settings.get("OSMOSIS_KEY_NAME") or OSMOSIS_KEY_NAME,
-        "--keyring-backend",
-        "test",
-        "--home",
-        settings.get("OSMOSIS_HOME") or OSMOSIS_HOME,
-        "--chain-id",
-        "osmosis-1",
-        "--node",
-        OSMOSIS_RPC,
-        "--gas",
-        "500000",
-        "--fees",
-        "15000uosmo",
-        "--broadcast-mode",
-        "sync",
-        "-o",
-        "json",
-        "-y",
-    ]
-    ibc_code, ibc_out = run_list(ibc_cmd)
-    ibc_tx = _extract_txhash(ibc_out)
-    packet_info = None
-    tx_resp = None
-    tx_code = None
-    tx_raw_log = None
-    try:
-        parsed = json.loads(ibc_out) if ibc_out else {}
-        if isinstance(parsed, dict):
-            tx_resp = parsed.get("tx_response") if isinstance(parsed.get("tx_response"), dict) else parsed
-            tx_code = tx_resp.get("code")
-            tx_raw_log = tx_resp.get("raw_log")
-            packet_info = _parse_send_packet(parsed) or _parse_send_packet(tx_resp or {})
-    except Exception:
-        packet_info = None
-
-    tx_found = False
-    if ibc_tx and (packet_info is None or tx_code is None):
-        try:
-            tx_found, tx_resp_fallback = _query_osmo_tx(ibc_tx, attempts=6, sleep_s=2.0)
-            if tx_resp_fallback:
-                tx_resp = tx_resp_fallback
-                if tx_code is None:
-                    tx_code = tx_resp_fallback.get("code")
-                if not tx_raw_log:
-                    tx_raw_log = tx_resp_fallback.get("raw_log")
-                if packet_info is None:
-                    packet_info = _parse_send_packet({"tx_response": tx_resp_fallback}) or _parse_send_packet(tx_resp_fallback)
-        except Exception:
-            tx_found = False
-
-    if ibc_code != 0 or (tx_code not in (None, 0)) or not ibc_tx:
-        _append_hotwallet_log(
-            {
-                "action": "arkeo_to_native",
-                "stage": "ibc_failed",
-                "detail": ibc_out,
-                "tx_code": tx_code,
-                "tx_raw_log": tx_raw_log,
-            }
-        )
-        return (
-            jsonify(
-                {
-                    "error": "ibc transfer failed",
-                    "detail": ibc_out,
-                    "raw_log": tx_raw_log or ibc_out,
-                    "ibc_tx": ibc_tx,
-                    "osmo_tx": ibc_tx,
-                    "osmo_tx_code": tx_code,
-                    "osmo_tx_raw_log": tx_raw_log,
-                    "ibc_cmd": ibc_cmd,
-                    "ibc_exit": ibc_code,
-                }
-            ),
-            500,
-        )
-
-    start_arkeo_bal, _ = _arkeo_balance(arkeo_addr)
-    # Attempt inclusion check on Osmosis
-    if not tx_found:
-        tx_found, tx_resp = _query_osmo_tx(ibc_tx, attempts=6, sleep_s=2.0)
-    if tx_resp:
-        tx_code = tx_resp.get("code") if tx_code is None else tx_code
-        tx_raw_log = tx_raw_log or tx_resp.get("raw_log")
-    arrived, arkeo_final, arkeo_poll_errors = _wait_for_arkeo_balance_increase(
-        arkeo_addr, amt_base, tolerance_bps=ARRIVAL_TOLERANCE_BPS, attempts=6, sleep_s=5, start_amt=start_arkeo_bal
-    )
-
-    _append_hotwallet_log(
-        {
-            "action": "arkeo_to_native",
-            "stage": "submitted",
-            "ibc_tx": ibc_tx,
-            "osmo_tx": ibc_tx,
-            "packet_sequence": packet_info.get("packet_sequence") if packet_info else None,
-            "osmo_src_channel": packet_info.get("src_channel") if packet_info else None,
-            "arkeo_dst_channel": packet_info.get("dst_channel") if packet_info else None,
-            "packet_info_found": bool(packet_info),
-            "arkeo_start": start_arkeo_bal,
-            "arkeo_final": arkeo_final,
-            "arkeo_expected": amt_base,
-            "arrival_confirmed": arrived,
-            "arkeo_poll_errors": arkeo_poll_errors,
-            "osmo_included": tx_found,
-            "osmo_tx_code": tx_code,
-            "osmo_tx_raw_log": tx_raw_log,
-        }
-    )
-
-    return jsonify(
-        {
-            "status": "submitted",
-            "ibc_tx": ibc_tx,
-            "osmo_tx": ibc_tx,
-            "packet_sequence": packet_info.get("packet_sequence") if packet_info else None,
-            "osmo_src_channel": packet_info.get("src_channel") if packet_info else None,
-            "arkeo_dst_channel": packet_info.get("dst_channel") if packet_info else None,
-            "packet_info_found": bool(packet_info),
-            "arkeo_denom": arkeo_denom,
-            "arkeo_start": start_arkeo_bal,
-            "arkeo_final": arkeo_final,
-            "arkeo_expected": amt_base,
-            "arrival_confirmed": arrived,
-            "arkeo_poll_errors": arkeo_poll_errors,
-            "osmo_included": tx_found,
-            "osmo_tx_code": tx_code,
-            "osmo_tx_raw_log": tx_raw_log,
-            "ibc_cmd": _mask_cmd_sensitive(ibc_cmd),
-        }
-    )
-
-
 @app.post("/api/hotwallet/arkeo-to-osmosis")
 def hotwallet_arkeo_to_osmosis():
     """
@@ -2019,13 +1830,13 @@ def hotwallet_arkeo_to_osmosis():
         return jsonify({"error": "ARKEO_TO_OSMO_CHANNEL not configured"}), 400
 
     settings = _merge_subscriber_settings()
-    settings, osmo_err = _ensure_osmo_wallet(settings)
+    # Osmosis hot wallet not required; rely on provided Osmosis address (e.g., Keplr) or stored address.
     settings, arkeo_err = _ensure_arkeo_mnemonic(settings)
-    if osmo_err:
-        return jsonify({"error": f"osmo wallet: {osmo_err}"}), 400
     if arkeo_err:
         return jsonify({"error": f"arkeo wallet: {arkeo_err}"}), 400
-    osmo_addr = settings.get("OSMOSIS_ADDRESS")
+    osmo_addr = payload.get("osmosis_address") or settings.get("OSMOSIS_ADDRESS")
+    if not osmo_addr:
+        return jsonify({"error": "osmosis address required (connect Keplr or set OSMOSIS_ADDRESS)"}), 400
     arkeo_addr, addr_err = derive_address(KEY_NAME, KEYRING)
     if addr_err:
         return jsonify({"error": f"arkeo address: {addr_err}"}), 400
@@ -2520,6 +2331,7 @@ def _default_subscriber_settings() -> dict:
         "MIN_OSMO_GAS": MIN_OSMO_GAS,
         "DEFAULT_SLIPPAGE_BPS": DEFAULT_SLIPPAGE_BPS,
         "ARRIVAL_TOLERANCE_BPS": ARRIVAL_TOLERANCE_BPS,
+        "WALLET_SYNC_INTERVAL": os.getenv("WALLET_SYNC_INTERVAL", "15"),
     }
     return defaults
 
@@ -3347,6 +3159,29 @@ def osmosis_rpc_get():
     """Return HTTP(S) Osmosis RPC endpoint (tcp converted to http)."""
     rpc = _ensure_http_rpc(OSMOSIS_RPC)
     return jsonify({"rpc": rpc})
+
+@app.get("/api/osmosis-arkeo-config")
+def osmosis_arkeo_config():
+    """Return basic config for Osmosis->Arkeo IBC (denom/channel/rpc)."""
+    try:
+        try:
+            arkeo_addr, addr_err = derive_address(KEY_NAME, KEYRING)
+        except Exception:
+            arkeo_addr, addr_err = "", "addr_error"
+        arkeo_denom = globals().get("ARKEO_OSMO_DENOM") or "ibc/AD969E97A63B64B30A6E4D9F598341A403B849F5ACFEAA9F18DBD9255305EC65"
+        channel = globals().get("OSMO_TO_ARKEO_CHANNEL") or "channel-103074"
+        payload = {
+            "arkeo_denom": arkeo_denom,
+            "source_channel": channel,
+            "source_port": "transfer",
+            "osmosis_rpc": _ensure_http_rpc(OSMOSIS_RPC),
+            "osmosis_chain_id": "osmosis-1",
+            "arkeo_address": arkeo_addr,
+            "arkeo_address_error": addr_err,
+        }
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.post("/api/osmosis-quote-usdc-to-arkeo")
@@ -6172,6 +6007,7 @@ class PaygProxyHandler(BaseHTTPRequestHandler):
         if self.path.strip("/").split("?")[0] == "arkeostatus":
             cfg = self.server.cfg
             node = cfg.get("node_rpc") or ARKEOD_NODE
+            sentinel = cfg.get("provider_sentinel_api") or SENTINEL_URI_DEFAULT
             service_id = cfg.get("service_id")
             service_name = cfg.get("service_name")
             client_key = cfg.get("client_key") or KEY_NAME
@@ -6252,6 +6088,17 @@ class PaygProxyHandler(BaseHTTPRequestHandler):
                             payload["contract_claims_url"] = f"{sentinel}/claims?contract_id={cid}&client={client_pub_local}"
                         if cid:
                             payload["contract_manage_url_hint"] = f"{sentinel}/manage/contract/{cid}"
+                        if cid and sentinel:
+                            ok_cfg, cfg_data, cfg_err = _fetch_contract_config(
+                                cid,
+                                sentinel,
+                                client_key,
+                                cfg.get("sign_template", PROXY_SIGN_TEMPLATE),
+                            )
+                            if ok_cfg and cfg_data is not None:
+                                payload["contract_config"] = cfg_data
+                            elif cfg_err:
+                                payload["contract_config_error"] = cfg_err
                     except Exception:
                         pass
                     if provider_filter:
