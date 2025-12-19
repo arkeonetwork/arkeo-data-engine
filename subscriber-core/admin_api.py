@@ -2189,7 +2189,9 @@ PROXY_DECORATE_RESPONSE = str(os.getenv("PROXY_DECORATE_RESPONSE", "true")).lowe
 PROXY_ARKAUTH_AS_HEADER = str(os.getenv("PROXY_ARKAUTH_AS_HEADER", "false")).lower() in ("1", "true", "yes", "on")
 PROXY_CONTRACT_TIMEOUT = int(os.getenv("PROXY_CONTRACT_TIMEOUT", "10"))
 PROXY_CONTRACT_LIMIT = int(os.getenv("PROXY_CONTRACT_LIMIT", "5000"))
-PROXY_TEST_TIMEOUT = float(os.getenv("PROXY_TEST_TIMEOUT", "12.0"))
+# Poll/test helper timeout (UI “Poll” and “Test” buttons). Default aligns with lane worst-case
+# (timeout_secs + create_timeout) so first-time contract opens can complete.
+PROXY_TEST_TIMEOUT = float(os.getenv("PROXY_TEST_TIMEOUT", "45.0"))
 PROXY_OPEN_COOLDOWN = int(os.getenv("PROXY_OPEN_COOLDOWN", "0"))  # seconds to cool down a provider after open failure
 PROXY_CONTRACT_CACHE_TTL = 0  # TTL disabled; cached contract reused until invalid
 SIGNHERE_HOME = os.path.join(Path.home(), ".arkeo")
@@ -5775,6 +5777,12 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
             cfg_create["create_delegate"] = client_pub
             cfg_create["provider_pubkey"] = provider_filter
             cfg_create["provider_sentinel_api"] = sentinel
+            # Align settlement duration with provider if known.
+            try:
+                if cand.get("settlement_duration"):
+                    cfg_create["create_settlement"] = cand.get("settlement_duration")
+            except Exception:
+                pass
             start_height = cur_height or _get_current_height(node)
             try:
                 _log(
@@ -7742,6 +7750,16 @@ def delete_listener(listener_id: str):
             _stop_listener_server(int(removed_entry.get("port")))
         except Exception:
             _stop_listener_server(removed_entry.get("port"))
+        # Clean up per-listener nonce stores for this listener.
+        try:
+            cache_path = Path(CACHE_DIR)
+            for f in cache_path.glob(f"nonce_store_{listener_id}_*.json"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     new_list.sort(key=lambda x: x.get("port") if isinstance(x, dict) else 0)
     data["listeners"] = new_list
     data["fetched_at"] = _timestamp()

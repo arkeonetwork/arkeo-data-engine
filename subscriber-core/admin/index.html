@@ -1615,6 +1615,22 @@
             res.method = method;
             res.payload = payload;
         };
+        // EVM-family defaults
+        if (
+            name.includes("eth") ||
+            name.includes("ethereum") ||
+            name.includes("evm") ||
+            name.includes("arbitrum") ||
+            name.includes("optimism") ||
+            name.includes("base") ||
+            name.includes("polygon") ||
+            name.includes("matic") ||
+            name.includes("bsc") ||
+            name.includes("binance")
+        ) {
+            set("POST", '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}');
+            return res;
+        }
         if (name.includes("rest")) {
             res.method = "GET";
             res.header = "application/json";
@@ -2792,7 +2808,6 @@
             alert("Please select a service type before adding a listener.");
             return;
         }
-        const svcName = (serviceNameById(svcId) || "").toLowerCase();
         const body = {
             status: "active",
             whitelist_ips: "",
@@ -2800,10 +2815,11 @@
             health_payload: "",
             health_header: "application/json",
         };
-        if (svcName.includes("cosmos") || svcName.includes("arkeo") || svcName.includes("gaia") || svcName.includes("osmosis")) {
-            body.health_method = "POST";
-            body.health_header = "application/json";
-            body.health_payload = '{"jsonrpc":"2.0","id":1,"method":"status","params":[]}';
+        const defaults = defaultHealthForService(svcId);
+        if (defaults) {
+            if (defaults.method) body.health_method = defaults.method;
+            if (defaults.header) body.health_header = defaults.header;
+            if (defaults.payload) body.health_payload = defaults.payload;
         }
         if (svcId) body.service_id = svcId;
         try {
