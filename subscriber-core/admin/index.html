@@ -3581,15 +3581,23 @@
                 const spacingMs = qpm > 0 ? Math.max(200, Math.round(60000 / qpm)) : 400;
                 const runs = 3;
                 let allOk = true;
-                for (let i = 0; i < runs; i++) {
+                    for (let i = 0; i < runs; i++) {
                     try {
                         // Treat the first run as a warm-up: it may pay a one-time contract fetch/config cost.
                         // We still display the result, but the backend will ignore it for response-time stats.
-                        const testUrl = apiUrl(`/api/listeners/${encodeURIComponent(id)}/test`) + (i === 0 ? "?warmup=1" : "");
+                        const qs = [];
+                        if (ts?.provider_pubkey) qs.push(`provider_pubkey=${encodeURIComponent(String(ts.provider_pubkey))}`);
+                        if (i === 0) qs.push("warmup=1");
+                        const testUrl = apiUrl(`/api/listeners/${encodeURIComponent(id)}/test`) + (qs.length ? `?${qs.join("&")}` : "");
                         const res = await fetch(testUrl, { method: "GET", cache: "no-store" });
                         const data = await res.json().catch(() => ({}));
                         const ok = isTestOk(res, data);
                         if (!ok) allOk = false;
+
+                        const expectedProvider = String(ts?.provider_pubkey || "");
+                        const usedProvider = String(data?.used_provider_pubkey || "");
+                        const providerMismatch = expectedProvider && usedProvider && expectedProvider !== usedProvider;
+                        if (providerMismatch) allOk = false;
 
                         const timings = data?.last_timings || {};
                         // Display end-to-end timing on the Contract line (this is what users care about in polling).
@@ -3608,6 +3616,9 @@
                         appendPollLog(`  Test ${i + 1}/${runs}:`);
                         appendPollLog(`    - Contract: ${contractOk ? "OK" : "Failed"} (${contractMsText})`);
                         appendPollLog(`    - Config: ${configOk ? "OK" : (configFailed ? "Failed" : "—")} (${configMsText})`);
+                        if (providerMismatch) {
+                            appendPollLog(`    - Provider: Failed (expected ${expectedProvider} got ${usedProvider})`);
+                        }
 
                         const err = !ok ? (data && (data.detail || data.error)) || res.statusText || res.status : "";
                         if (!ok && err) {

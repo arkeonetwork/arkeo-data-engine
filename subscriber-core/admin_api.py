@@ -5775,6 +5775,24 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
             except Exception:
                 pass
 
+    def _req_header(name: str) -> str | None:
+        try:
+            req_headers = getattr(work, "headers", None)
+            if not isinstance(req_headers, dict):
+                return None
+            val = req_headers.get(name)
+            if val is None:
+                name_l = str(name).lower()
+                for hk, hv in req_headers.items():
+                    if str(hk).lower() == name_l:
+                        val = hv
+                        break
+            if val is None:
+                return None
+            return str(val)
+        except Exception:
+            return None
+
     # Parity: enforce whitelist again inside the lane.
     wl = _parse_whitelist(cfg.get("whitelist_ips") or PROXY_WHITELIST_IPS)
     allow_all = any(ip == "0.0.0.0" for ip in wl)
@@ -5812,8 +5830,48 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
             server_ref.cors_configured = cfg.get("last_contracts") or {}
 
     # Candidate providers (ordered failover).
-    candidates = _candidate_providers(cfg)
+    forced_provider = None
+    try:
+        fp = _req_header("X-Arkeo-Force-Provider")
+        if fp:
+            fp = str(fp).strip()
+            if fp:
+                forced_provider = fp
+    except Exception:
+        forced_provider = None
+
+    candidate_cfg = cfg
+    if forced_provider:
+        try:
+            top_all = cfg.get("top_services") if isinstance(cfg.get("top_services"), list) else []
+            forced_top = [
+                ts
+                for ts in top_all
+                if isinstance(ts, dict) and str(ts.get("provider_pubkey") or "") == str(forced_provider)
+            ]
+            candidate_cfg = dict(cfg)
+            candidate_cfg["provider_pubkey"] = forced_provider
+            candidate_cfg["top_services"] = forced_top
+            # Hint the sentinel URL for fallback if present on the top_services row
+            try:
+                if forced_top and forced_top[0].get("sentinel_url"):
+                    candidate_cfg["provider_sentinel_api"] = forced_top[0].get("sentinel_url")
+            except Exception:
+                pass
+            _log("info", f"force_provider enabled provider={forced_provider}")
+        except Exception:
+            candidate_cfg = cfg
+
+    candidates = _candidate_providers(candidate_cfg)
+    if forced_provider:
+        candidates = [c for c in candidates if isinstance(c, dict) and str(c.get("provider_pubkey") or "") == str(forced_provider)]
     if not candidates:
+        if forced_provider:
+            return {
+                "status": 503,
+                "body": json.dumps({"error": "forced_provider_not_found", "provider_pubkey": forced_provider}),
+                "headers": {"Content-Type": "application/json"},
+            }
         return {"status": 503, "body": json.dumps({"error": "no_providers"}), "headers": {"Content-Type": "application/json"}}
     try:
         ordered = ", ".join(
@@ -5848,7 +5906,12 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
     for idx, cand in enumerate(candidates, start=1):
         cand_start = time.time()
         provider_filter = cand.get("provider_pubkey")
-        sentinel = _normalize_sentinel_url(cand.get("sentinel_url") or cfg.get("provider_sentinel_api") or SENTINEL_URI_DEFAULT)
+        sentinel = _normalize_sentinel_url(
+            cand.get("sentinel_url")
+            or candidate_cfg.get("provider_sentinel_api")
+            or cfg.get("provider_sentinel_api")
+            or SENTINEL_URI_DEFAULT
+        )
         if not provider_filter or not sentinel:
             continue
 
@@ -5857,7 +5920,7 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
         # Skip providers on cooldown.
         try:
             cd = getattr(server_ref, "cooldowns", {}).get(provider_filter) if server_ref is not None else None
-            if cd and time.time() < cd:
+            if cd and time.time() < cd and not forced_provider:
                 continue
         except Exception:
             pass
@@ -8188,6 +8251,11 @@ def test_listener(listener_id: str):
         headers = {}
         if hh:
             headers["Content-Type"] = hh
+        forced_provider = request.args.get("provider_pubkey") or request.args.get("provider")
+        if forced_provider:
+            forced_provider = str(forced_provider).strip()
+            if forced_provider:
+                headers["X-Arkeo-Force-Provider"] = forced_provider
         # Polling uses the first run as a warm-up (contract fetch / config) and should not skew response-time stats.
         warmup = request.args.get("warmup")
         if warmup and str(warmup).strip().lower() not in ("0", "false", "no", "off", "null"):
@@ -8236,6 +8304,24 @@ def test_listener(listener_id: str):
             method=hm,
             path=req_path,
         )
+        used_provider = None
+        used_contract_id = None
+        used_nonce = None
+        if isinstance(resp_headers, dict):
+            def _hdr(name: str) -> str | None:
+                v = resp_headers.get(name)
+                if v is None:
+                    name_l = name.lower()
+                    for hk, hv in resp_headers.items():
+                        if str(hk).lower() == name_l:
+                            v = hv
+                            break
+                if v is None:
+                    return None
+                return str(v)
+            used_provider = _hdr("X-Arkeo-Provider")
+            used_contract_id = _hdr("X-Arkeo-Contract-Id")
+            used_nonce = _hdr("X-Arkeo-Nonce")
         timings_from_header = None
         if isinstance(resp_headers, dict):
             th = resp_headers.get("X-Arkeo-Timings") or resp_headers.get("x-arkeo-timings")
@@ -8272,6 +8358,16 @@ def test_listener(listener_id: str):
             "provider_pubkey": target.get("provider_pubkey"),
             "provider_sentinel_api": target.get("sentinel_url"),
         }
+        if forced_provider:
+            runtime_cfg["provider_pubkey"] = forced_provider
+            try:
+                runtime_cfg["top_services"] = [
+                    ts
+                    for ts in (runtime_cfg.get("top_services") or [])
+                    if isinstance(ts, dict) and str(ts.get("provider_pubkey") or "") == str(forced_provider)
+                ]
+            except Exception:
+                pass
         candidates = _candidate_providers(runtime_cfg) or []
         primary = candidates[0] if candidates else {}
         cand_sentinel = _normalize_sentinel_url(primary.get("sentinel_url"))
@@ -8283,10 +8379,14 @@ def test_listener(listener_id: str):
             "command": cmd,
             "service_id": target.get("service_id"),
             "service_name": target.get("service_name"),
-        "provider_pubkey": provider_pk,
-        "provider_moniker": provider_moniker,
-        "sentinel_url": sentinel_norm,
-        "sentinel_target": sentinel_target,
+            "forced_provider_pubkey": forced_provider,
+            "used_provider_pubkey": used_provider,
+            "used_contract_id": used_contract_id,
+            "used_nonce": used_nonce,
+            "provider_pubkey": provider_pk,
+            "provider_moniker": provider_moniker,
+            "sentinel_url": sentinel_norm,
+            "sentinel_target": sentinel_target,
             "response_headers": resp_headers or {},
             "candidate_sentinel": cand_sentinel,
             "candidate_provider": cand_provider,
