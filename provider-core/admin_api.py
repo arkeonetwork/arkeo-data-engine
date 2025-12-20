@@ -14,6 +14,8 @@ import urllib.request
 import urllib.parse
 import yaml
 import datetime
+import threading
+from contextlib import contextmanager
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -148,6 +150,18 @@ DEFAULT_OSMOSIS_USDC_DENOMS = [
 _env_osmo_denoms = [d.strip() for d in (os.getenv("OSMOSIS_USDC_DENOMS") or "").split(",") if d.strip()]
 OSMOSIS_USDC_DENOMS = _env_osmo_denoms if _env_osmo_denoms else DEFAULT_OSMOSIS_USDC_DENOMS.copy()
 MIN_OSMO_GAS = _safe_float(os.getenv("MIN_OSMO_GAS") or 0.1, 0.1)
+
+TX_LOCK = threading.Lock()
+
+
+@contextmanager
+def tx_lock(timeout_s: float = 30.0):
+    if not TX_LOCK.acquire(timeout=timeout_s):
+        raise TimeoutError("tx lock busy")
+    try:
+        yield
+    finally:
+        TX_LOCK.release()
 DEFAULT_SLIPPAGE_BPS = int(os.getenv("DEFAULT_SLIPPAGE_BPS") or "100")
 ARRIVAL_TOLERANCE_BPS = int(os.getenv("ARRIVAL_TOLERANCE_BPS") or "100")
 OSMO_TO_ARKEO_CHANNEL = "channel-103074"
@@ -1528,6 +1542,9 @@ def hotwallet_arkeo_to_osmosis():
 
     _append_hotwallet_log({"action": "arkeo_to_osmosis", "stage": "start", "amount": amt_float})
 
+    retry_sequence = None
+    retry_attempted = False
+    retry_sequences_tried: list[str] = []
     ibc_cmd = [
         "arkeod",
         "--home",
@@ -1559,38 +1576,106 @@ def hotwallet_arkeo_to_osmosis():
         "-o",
         "json",
     ]
-    ibc_code, ibc_out = run_list(ibc_cmd)
-    ibc_tx = _extract_txhash(ibc_out)
-    tx_code = None
-    tx_raw_log = None
-    packet_info = None
-    try:
-        packet_info = _parse_send_packet(json.loads(ibc_out) if ibc_out else {})
-    except Exception:
-        packet_info = None
 
-    if ibc_tx and not packet_info:
-        try:
-            tx_json_raw = run_list(
-                [
-                    "arkeod",
-                    "--home",
-                    ARKEOD_HOME,
-                    "query",
-                    "tx",
-                    ibc_tx,
-                    "--node",
-                    ARKEOD_NODE,
-                    "-o",
-                    "json",
-                ]
-            )[1]
-            tx_raw_log = tx_json_raw
-            parsed = json.loads(tx_json_raw)
-            tx_code = (parsed.get("tx_response") or {}).get("code")
-            packet_info = _parse_send_packet(parsed)
-        except Exception:
+    try:
+        with tx_lock(timeout_s=45.0):
+            ibc_code, ibc_out = run_list(ibc_cmd)
+            ibc_tx = _extract_txhash(ibc_out)
+            tx_code = None
+            tx_raw_log = None
             packet_info = None
+            try:
+                packet_info = _parse_send_packet(json.loads(ibc_out) if ibc_out else {})
+            except Exception:
+                packet_info = None
+
+            if ibc_tx and not packet_info:
+                try:
+                    tx_json_raw = run_list(
+                        [
+                            "arkeod",
+                            "--home",
+                            ARKEOD_HOME,
+                            "query",
+                            "tx",
+                            ibc_tx,
+                            "--node",
+                            ARKEOD_NODE,
+                            "-o",
+                            "json",
+                        ]
+                    )[1]
+                    tx_raw_log = tx_json_raw
+                    parsed = json.loads(tx_json_raw)
+                    tx_code = (parsed.get("tx_response") or {}).get("code")
+                    packet_info = _parse_send_packet(parsed)
+                except Exception:
+                    packet_info = None
+
+            # Retry on account-sequence mismatch by waiting for the expected sequence to land.
+            if (ibc_code != 0 or not ibc_tx) and "account sequence mismatch" in str(ibc_out).lower():
+                for attempt in range(4):
+                    exp = None
+                    m_exp = re.search(r"expected\s+(\d+)", str(ibc_out))
+                    if m_exp:
+                        exp = m_exp.group(1)
+                    if exp:
+                        retry_attempted = True
+                        retry_sequence = str(exp)
+                        retry_sequences_tried.append(retry_sequence)
+                        _append_hotwallet_log(
+                            {
+                                "action": "arkeo_to_osmosis",
+                                "stage": "ibc_retry_sequence",
+                                "sequence": retry_sequence,
+                                "attempt": attempt + 1,
+                            }
+                        )
+                        # Wait for chain sequence to catch up to expected.
+                        try:
+                            target = int(exp)
+                        except Exception:
+                            target = None
+                        if target is not None:
+                            deadline = time.time() + 12
+                            while time.time() < deadline:
+                                try:
+                                    seq_cmd = ["arkeod", "--home", ARKEOD_HOME, "query", "auth", "account", arkeo_addr, "-o", "json"]
+                                    if ARKEOD_NODE:
+                                        seq_cmd.extend(["--node", ARKEOD_NODE])
+                                    seq_code, seq_out = run_list(seq_cmd)
+                                    if seq_code == 0:
+                                        acct = json.loads(seq_out)
+                                        if isinstance(acct, dict):
+                                            account_info = acct.get("account") or acct.get("result") or {}
+                                            seq_val = None
+                                            if isinstance(account_info, dict):
+                                                val = account_info.get("value") or account_info
+                                                if isinstance(val, dict):
+                                                    seq_val = val.get("sequence")
+                                                elif account_info.get("base_account"):
+                                                    base = account_info.get("base_account") or {}
+                                                    if isinstance(base, dict):
+                                                        seq_val = base.get("sequence")
+                                            if seq_val is not None and int(seq_val) >= target:
+                                                break
+                                except Exception:
+                                    pass
+                                time.sleep(1.0)
+                    # Retry the original cmd (let CLI pick the sequence after chain advances)
+                    ibc_code, ibc_out = run_list(ibc_cmd)
+                    ibc_tx = _extract_txhash(ibc_out)
+                    try:
+                        packet_info = _parse_send_packet(json.loads(ibc_out) if ibc_out else {})
+                    except Exception:
+                        packet_info = None
+                    if ibc_code == 0 and ibc_tx:
+                        break
+                    if "account sequence mismatch" not in str(ibc_out).lower():
+                        break
+                    time.sleep(0.8)
+    except TimeoutError:
+        return jsonify({"error": "tx lock busy, try again shortly"}), 409
 
     if ibc_code != 0 or not ibc_tx:
         _append_hotwallet_log({"action": "arkeo_to_osmosis", "stage": "ibc_failed", "detail": ibc_out})
@@ -1602,11 +1687,13 @@ def hotwallet_arkeo_to_osmosis():
                     "raw_log": ibc_out,
                     "ibc_cmd": ibc_cmd,
                     "ibc_exit": ibc_code,
+                    "retry_attempted": retry_attempted,
+                    "retry_sequence": retry_sequence,
+                    "retry_sequences": retry_sequences_tried if retry_attempted else None,
                 }
             ),
             500,
         )
-
     _append_hotwallet_log(
         {
             "action": "arkeo_to_osmosis",
@@ -1658,6 +1745,9 @@ def hotwallet_arkeo_to_osmosis():
             "packet_info_found": bool(packet_info),
             "tx_code": tx_code,
             "tx_raw_log": tx_raw_log,
+            "retry_attempted": retry_attempted,
+            "retry_sequence": retry_sequence,
+            "retry_sequences": retry_sequences_tried if retry_attempted else None,
             "ibc_cmd": _mask_cmd_sensitive(ibc_cmd),
         }
     )
@@ -4134,7 +4224,11 @@ def provider_claims():
                     "-o",
                     "json",
                 ]
-                return run_list(cmd)
+                try:
+                    with tx_lock(timeout_s=45.0):
+                        return run_list(cmd)
+                except TimeoutError as e:
+                    return 1, str(e)
 
             start_submit = time.time()
             exit_code, tx_out = submit(seq)

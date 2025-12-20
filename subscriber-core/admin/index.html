@@ -2188,49 +2188,6 @@
         if (modal) modal.classList.remove("hidden");
     }
 
-	    function showTopServicesHelp(topic, event) {
-	        if (event && typeof event.stopPropagation === "function") event.stopPropagation();
-	        const t = String(topic || "").toLowerCase();
-	        if (t === "contract") {
-	            const body = `
-	                <div class="muted small" style="line-height:1.5;">
-	                    <div style="font-weight:700; margin:0 0 6px 0;">Success</div>
-	                    <ul style="margin:0 0 12px 18px; padding:0;">
-	                        <li>There is an active PAYG contract cached for that provider service.</li>
-	                    </ul>
-	                    <div style="font-weight:700; margin:0 0 6px 0;">Common reasons for failure</div>
-	                    <ul style="margin:0 0 0 18px; padding:0;">
-	                        <li>No active contract found yet (first use / cache cleared).</li>
-	                        <li>Auto-create failed (rate/settlement mismatch, insufficient funds, chain error).</li>
-	                        <li>Contract exists but is no longer usable (expired/settled/invalid) and needs recreation.</li>
-	                        <li>The provider sentinel or node is down. Check the listener log for more details.</li>
-	                    </ul>
-	                </div>
-	            `;
-	            showResultModal("Top Services: Contract", body, true);
-	            return;
-	        }
-	        if (t === "config") {
-	            const body = `
-	                <div class="muted small" style="line-height:1.5;">
-	                    <div style="font-weight:700; margin:0 0 6px 0;">Success</div>
-	                    <ul style="margin:0 0 12px 18px; padding:0;">
-	                        <li>The listener CORS origins are applied to proxy responses.</li>
-	                    </ul>
-	                    <div style="font-weight:700; margin:0 0 6px 0;">Common reasons for failure</div>
-	                    <ul style="margin:0 0 0 18px; padding:0;">
-	                        <li>Listener CORS origins is empty or invalid.</li>
-	                        <li>The browser Origin is not allowed by the listener CORS list.</li>
-	                        <li>If Config is red, browser clients may hit CORS errors even if the contract works.</li>
-	                    </ul>
-	                </div>
-	            `;
-	            showResultModal("Top Services: Config", body, true);
-	            return;
-	        }
-	        showResultModal("Top Services", "Help unavailable.");
-	    }
-
     function scrollResultModalBottom() {
         const doScroll = () => {
             const modalBody = document.getElementById("modalBody");
@@ -3444,6 +3401,8 @@
                 provider_pubkey: provider,
                 contract: contractObj,
                 contract_config: contractCfg,
+                cors_request_origin: data?.cors_request_origin ?? null,
+                cors_allow_origin: data?.cors_allow_origin ?? null,
             };
             const pretty = escapeHtml(JSON.stringify(minimal, null, 2));
             updateModalBodyHtml(`${header}<pre class="mono" style="max-height:50vh;overflow:auto;">${pretty}</pre>`);
@@ -3557,7 +3516,7 @@
                 let allOk = true;
                     for (let i = 0; i < runs; i++) {
                     try {
-                        // Treat the first run as a warm-up: it may pay a one-time contract fetch/config cost.
+                        // Treat the first run as a warm-up: it may pay a one-time contract fetch cost.
                         // We still display the result, but the backend will ignore it for response-time stats.
                         const qs = [];
                         if (ts?.provider_pubkey) qs.push(`provider_pubkey=${encodeURIComponent(String(ts.provider_pubkey))}`);

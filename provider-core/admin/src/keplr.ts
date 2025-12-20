@@ -44,6 +44,7 @@ const DEFAULT_POOL_ID = 2977;
 const DEFAULT_GAS_PRICE = "0.0025uosmo";
 const DEFAULT_SWAP_GAS = 350000;
 const DEFAULT_IBC_GAS = 250000;
+const DEFAULT_IBC_TIMEOUT_SECONDS = 600;
 
 let cachedChainId = DEFAULT_CHAIN_ID;
 let cachedRpc = "";
@@ -64,6 +65,52 @@ function normalizeAmount(val: string | number | bigint): string {
 
 function buildRegistry() {
     return new ProtoRegistry([...defaultRegistryTypes, ...(osmosis.gamm.v1beta1.registry || [])]);
+}
+
+async function resolveIbcTimeout(
+    client: SigningStargateClient,
+    chainId: string,
+    timeoutSeconds: number,
+) {
+    let blockTimeMs: number | null = null;
+    let blockHeight: number | null = null;
+    try {
+        const block = await client.getBlock();
+        const headerTime = block?.header?.time as unknown;
+        if (headerTime instanceof Date) {
+            blockTimeMs = headerTime.getTime();
+        } else if (typeof headerTime === "string") {
+            const parsed = Date.parse(headerTime);
+            if (!Number.isNaN(parsed)) blockTimeMs = parsed;
+        }
+        const headerHeight = (block?.header?.height as unknown) ?? null;
+        if (typeof headerHeight === "number") {
+            blockHeight = headerHeight;
+        } else if (typeof headerHeight === "string") {
+            const parsedHeight = parseInt(headerHeight, 10);
+            if (!Number.isNaN(parsedHeight)) blockHeight = parsedHeight;
+        } else if (headerHeight && typeof (headerHeight as { toNumber?: () => number }).toNumber === "function") {
+            const parsedHeight = (headerHeight as { toNumber: () => number }).toNumber();
+            if (Number.isFinite(parsedHeight)) blockHeight = parsedHeight;
+        }
+    } catch {
+        blockTimeMs = null;
+        blockHeight = null;
+    }
+
+    const baseMs = blockTimeMs && blockTimeMs > 0 ? blockTimeMs : Date.now();
+    const timeoutTimestamp =
+        BigInt(baseMs) * 1_000_000n + BigInt(timeoutSeconds) * 1_000_000_000n;
+
+    let timeoutHeight: { revisionNumber: number; revisionHeight: number } | undefined;
+    const revStr = chainId.split("-").pop() || "";
+    const revisionNumber = parseInt(revStr, 10);
+    if (Number.isFinite(revisionNumber) && blockHeight && blockHeight > 0) {
+        const extraBlocks = Math.max(50, Math.ceil(timeoutSeconds / 6));
+        timeoutHeight = { revisionNumber, revisionHeight: blockHeight + extraBlocks };
+    }
+
+    return { timeoutTimestamp, timeoutHeight };
 }
 
 async function ensureSigner(chainId: string) {
@@ -142,16 +189,16 @@ export async function signAndBroadcastIbcTransfer(opts: IbcTransferOptions) {
     if (!opts.rpcEndpoint) throw new Error("rpcEndpoint is required to sign IBC transfer.");
     const client = await ensureClient({ chainId, rpcEndpoint: opts.rpcEndpoint });
     const addr = opts.senderAddress || cachedAddress || (await connectKeplr(opts));
-    const timeoutSeconds = opts.timeoutSeconds ?? 300;
+    const timeoutSeconds = Math.max(60, Math.floor(opts.timeoutSeconds ?? DEFAULT_IBC_TIMEOUT_SECONDS));
     const fee = calculateFee(opts.gas || DEFAULT_IBC_GAS, GasPrice.fromString(opts.gasPrice || DEFAULT_GAS_PRICE));
-    const timeoutTimestamp = BigInt(Date.now()) * 1_000_000n + BigInt(timeoutSeconds) * 1_000_000_000n;
+    const { timeoutTimestamp, timeoutHeight } = await resolveIbcTimeout(client, chainId, timeoutSeconds);
     const result = await client.sendIbcTokens(
         addr,
         opts.receiver,
         { denom: opts.denom, amount: normalizeAmount(opts.amountBase) },
         opts.sourcePort || "transfer",
         opts.sourceChannel,
-        undefined,
+        timeoutHeight,
         timeoutTimestamp,
         fee,
         opts.memo || "",

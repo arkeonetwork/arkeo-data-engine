@@ -1621,6 +1621,12 @@ pre {
     font-size: 13px;
     line-height: 1.4;
     }
+#resultModal .modal-card h3 {
+    margin-bottom: 8px;
+}
+#resultModal .modal-body {
+    margin-bottom: 12px;
+}
 .modal-card .primary {
     align-self: flex-end;
 }

@@ -13,6 +13,7 @@ import socket
 import socketserver
 import subprocess
 import threading
+from contextlib import contextmanager
 import time
 import traceback
 import urllib.error
@@ -56,9 +57,20 @@ ADMIN_SESSIONS: dict[str, float] = {}
 _LISTENER_SERVERS: dict[int, dict] = {}
 _LISTENER_LOCK = threading.Lock()
 _LISTENERS_RW_LOCK = threading.RLock()
+TX_LOCK = threading.Lock()
 _PORT_FLOOR = None
 HOTWALLET_LOG = os.path.join(CACHE_DIR, "logs", "hotwallet-tx.log")
 AXELAR_CONFIG_CACHE = os.path.join(CONFIG_DIR, "axelar", "eth-mainnet.json")
+
+
+@contextmanager
+def tx_lock(timeout_s: float = 30.0):
+    if not TX_LOCK.acquire(timeout=timeout_s):
+        raise TimeoutError("tx lock busy")
+    try:
+        yield
+    finally:
+        TX_LOCK.release()
 
 
 def _load_port_floor() -> int:
@@ -2008,16 +2020,86 @@ def hotwallet_arkeo_to_osmosis():
         "-o",
         "json",
     ]
-    ibc_code, ibc_out = run_list(ibc_cmd)
-    ibc_tx = _extract_txhash(ibc_out)
-    tx_code = None
-    tx_raw_log = None
-    packet_info = None
-    try:
-        packet_info = _parse_send_packet(json.loads(ibc_out) if ibc_out else {})
-    except Exception:
-        packet_info = None
+    retry_sequence = None
+    retry_attempted = False
+    retry_sequences_tried: list[str] = []
 
+    try:
+        with tx_lock(timeout_s=45.0):
+            ibc_code, ibc_out = run_list(ibc_cmd)
+            ibc_tx = _extract_txhash(ibc_out)
+            tx_code = None
+            tx_raw_log = None
+            packet_info = None
+            try:
+                packet_info = _parse_send_packet(json.loads(ibc_out) if ibc_out else {})
+            except Exception:
+                packet_info = None
+
+            # Retry on account-sequence mismatch by waiting for the expected sequence to land.
+            if (ibc_code != 0 or not ibc_tx) and "account sequence mismatch" in str(ibc_out).lower():
+                for attempt in range(4):
+                    exp = None
+                    m_exp = re.search(r"expected\s+(\d+)", str(ibc_out))
+                    if m_exp:
+                        exp = m_exp.group(1)
+                    if exp:
+                        retry_attempted = True
+                        retry_sequence = str(exp)
+                        retry_sequences_tried.append(retry_sequence)
+                        _append_hotwallet_log(
+                            {
+                                "action": "arkeo_to_osmosis",
+                                "stage": "ibc_retry_sequence",
+                                "sequence": retry_sequence,
+                                "attempt": attempt + 1,
+                            }
+                        )
+                        # Wait for chain sequence to catch up to expected.
+                        try:
+                            target = int(exp)
+                        except Exception:
+                            target = None
+                        if target is not None:
+                            deadline = time.time() + 12
+                            while time.time() < deadline:
+                                try:
+                                    seq_cmd = ["arkeod", "--home", ARKEOD_HOME, "query", "auth", "account", arkeo_addr, "-o", "json"]
+                                    if ARKEOD_NODE:
+                                        seq_cmd.extend(["--node", ARKEOD_NODE])
+                                    seq_code, seq_out = run_list(seq_cmd)
+                                    if seq_code == 0:
+                                        acct = json.loads(seq_out)
+                                        if isinstance(acct, dict):
+                                            account_info = acct.get("account") or acct.get("result") or {}
+                                            seq_val = None
+                                            if isinstance(account_info, dict):
+                                                val = account_info.get("value") or account_info
+                                                if isinstance(val, dict):
+                                                    seq_val = val.get("sequence")
+                                                elif account_info.get("base_account"):
+                                                    base = account_info.get("base_account") or {}
+                                                    if isinstance(base, dict):
+                                                        seq_val = base.get("sequence")
+                                            if seq_val is not None and int(seq_val) >= target:
+                                                break
+                                except Exception:
+                                    pass
+                                time.sleep(1.0)
+                    # Retry the original cmd (let CLI pick the sequence after chain advances)
+                    ibc_code, ibc_out = run_list(ibc_cmd)
+                    ibc_tx = _extract_txhash(ibc_out)
+                    try:
+                        packet_info = _parse_send_packet(json.loads(ibc_out) if ibc_out else {})
+                    except Exception:
+                        packet_info = None
+                    if ibc_code == 0 and ibc_tx:
+                        break
+                    if "account sequence mismatch" not in str(ibc_out).lower():
+                        break
+                    time.sleep(0.8)
+    except TimeoutError:
+        return jsonify({"error": "tx lock busy, try again shortly"}), 409
     # Fallback: query Arkeo tx to pull packet info and tx code
     if ibc_tx and not packet_info:
         try:
@@ -2052,6 +2134,9 @@ def hotwallet_arkeo_to_osmosis():
                     "raw_log": ibc_out,
                     "ibc_cmd": ibc_cmd,
                     "ibc_exit": ibc_code,
+                    "retry_attempted": retry_attempted,
+                    "retry_sequence": retry_sequence,
+                    "retry_sequences": retry_sequences_tried if retry_attempted else None,
                 }
             ),
             500,
@@ -2073,6 +2158,9 @@ def hotwallet_arkeo_to_osmosis():
             "packet_info_found": bool(packet_info),
             "tx_code": tx_code,
             "tx_raw_log": tx_raw_log,
+            "retry_attempted": retry_attempted,
+            "retry_sequence": retry_sequence,
+            "retry_sequences": retry_sequences_tried if retry_attempted else None,
         }
     )
 
@@ -2110,6 +2198,9 @@ def hotwallet_arkeo_to_osmosis():
             "tx_code": tx_code,
             "tx_raw_log": tx_raw_log,
             "ibc_cmd": _mask_cmd_sensitive(ibc_cmd),
+            "retry_attempted": retry_attempted,
+            "retry_sequence": retry_sequence,
+            "retry_sequences": retry_sequences_tried if retry_attempted else None,
         }
     )
 
@@ -6513,59 +6604,6 @@ def _sign_message(
     return sig_hex, ""
 
 
-def _configure_contract_cors(
-    contract_id: int | str,
-    sentinel_url: str | None,
-    client_key: str,
-    cors_origins: str | list | None,
-    sign_template: str = PROXY_SIGN_TEMPLATE,
-) -> tuple[bool, str]:
-    """Best-effort CORS config push to sentinel manage API."""
-    origins = _parse_cors_origins(cors_origins)
-    if not origins:
-        return False, "no cors origins provided"
-    if not sentinel_url:
-        return False, "no sentinel url"
-    try:
-        cid = str(int(contract_id))
-    except Exception:
-        return False, "invalid contract id"
-    base = _normalize_sentinel_url(sentinel_url) or ""
-    base = base.rstrip("/")
-    if not base:
-        return False, "invalid sentinel url"
-    nonce = int(time.time())
-    sig, err = _sign_message(client_key, cid, nonce, sign_template)
-    if err or not sig:
-        return False, err or "sign failed"
-    qs = urllib.parse.urlencode({"arkcontract": f"{cid}:{nonce}:{sig}"})
-    url = f"{base}/manage/contract/{cid}?{qs}"
-    payload = {
-        "cors": {
-            "allow_origins": origins,
-            "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["*"],
-        }
-    }
-    try:
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            status = resp.status or 200
-            if 200 <= status < 300:
-                return True, ""
-            return False, f"status {status}"
-    except urllib.error.HTTPError as e:
-        try:
-            body = e.read().decode(errors="ignore")
-        except Exception:
-            body = ""
-        return False, f"http_error {e.code}: {body[:200]}"
-    except Exception as e:
-        return False, str(e)
-
-
 def _fetch_contract_config(
     contract_id: int | str,
     sentinel_url: str | None,
@@ -6858,6 +6896,11 @@ class PaygProxyHandler(BaseHTTPRequestHandler):
                 if not err:
                     client_pub_local = bech
                     self.server.client_pubkey = bech
+            try:
+                req_origin = self.headers.get("Origin")
+            except Exception:
+                req_origin = None
+            allow_origin = _resolve_proxy_cors_origin(req_origin, cfg)
             payload = {
                 "client_pub_local": client_pub_local,
                 "active_contract": getattr(self.server, "active_contract", None),
@@ -6869,6 +6912,8 @@ class PaygProxyHandler(BaseHTTPRequestHandler):
                 "sentinel": cfg.get("provider_sentinel_api"),
                 "height": None,
                 "active_contract_provider_moniker": None,
+                "cors_request_origin": req_origin,
+                "cors_allow_origin": allow_origin,
             }
             try:
                 payload["height"] = _get_current_height(node)
@@ -6948,13 +6993,6 @@ class PaygProxyHandler(BaseHTTPRequestHandler):
                         self.server.active_contract = active
                         if hasattr(self.server, "active_contracts") and provider_filter:
                             self.server.active_contracts[provider_filter] = active
-                    except Exception:
-                        pass
-                    # reflect listener CORS origins for status/debug
-                    try:
-                        origins = cfg.get("cors_allowed_origins")
-                        if origins is not None:
-                            payload["cors_allowed_origins"] = origins
                     except Exception:
                         pass
                     # try to pick last nonce if cached
