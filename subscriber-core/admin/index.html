@@ -275,7 +275,7 @@
         </div>
     </div>
     <form id="listenerForm" class="listener-form" onsubmit="submitListenerForm(event)">
-        <div class="listener-grid" style="grid-template-columns: 1fr auto; align-items: end; gap: 12px;">
+        <div class="listener-grid" style="grid-template-columns: 1fr 1fr auto; align-items: end; gap: 12px;">
             <label style="width:100%;">
                 <div class="muted">Service Type</div>
                 <div class="muted small">Choose a provider service to bind to a listener.</div>
@@ -289,6 +289,21 @@
                         <div id="svcComboOptions" class="combo-options"></div>
                     </div>
                     <select id="listenerService" class="hidden" aria-hidden="true" tabindex="-1"></select>
+                </div>
+            </label>
+            <label style="width:100%;">
+                <div class="muted">Location</div>
+                <div class="muted small">Select the region for this service.</div>
+                <div class="combo-select">
+                    <div id="locComboDisplay" class="combo-display" onclick="toggleLocationMenu(event)">
+                        <span id="locComboSelected">Select a region</span>
+                        <span class="combo-caret">▾</span>
+                    </div>
+                    <div id="locComboMenu" class="combo-menu hidden">
+                        <input type="text" id="locComboSearch" class="full combo-search" placeholder="Search regions..." oninput="filterLocationOptions()" autocomplete="off" autocorrect="off" spellcheck="false" />
+                        <div id="locComboOptions" class="combo-options"></div>
+                    </div>
+                    <select id="listenerLocation" class="hidden" aria-hidden="true" tabindex="-1"></select>
                 </div>
             </label>
             <div class="listener-actions" style="align-self:flex-end; white-space: nowrap;">
@@ -1592,6 +1607,7 @@
     let portRangeGlobal = [62001, 62100];
     let portFloorGlobal = 62001;
     let serviceMenuOpen = false;
+    let locationMenuOpen = false;
     let hotWalletsOpen = false;
     const DEFAULT_WALLET_SYNC_MS = 15000;
     let walletRefreshTimer = null;
@@ -2164,6 +2180,7 @@
         // Keep listener table/logs fresh for dashboard view; skip while editing to avoid clobbering form state
         setInterval(() => { if (!listenersEditingId) loadListeners(); }, 5000);
         refreshServiceTypes(false);
+        populateLocationSelect();
         // try to populate metrics from initial cache-refresh data if present
         updateMetrics();
         // poll cache status to reflect background sync
@@ -2410,6 +2427,36 @@
     let providersByServiceCache = {};
     let providersFetchInFlight = {};
     let lastServiceTypesFetch = 0;
+    const LOCATION_OPTIONS = [
+        "Africa",
+        "Africa – Northern",
+        "Africa – Eastern",
+        "Africa – Middle",
+        "Africa – Western",
+        "Africa – Southern",
+        "Americas",
+        "Americas – Northern",
+        "Americas – Caribbean",
+        "Americas – Central",
+        "Americas – South",
+        "Asia",
+        "Asia – Central",
+        "Asia – Eastern",
+        "Asia – Southeastern",
+        "Asia – Southern",
+        "Asia – Western",
+        "Europe",
+        "Europe – Northern",
+        "Europe – Eastern",
+        "Europe – Southern",
+        "Europe – Western",
+        "Oceania",
+        "Oceania – Australia & New Zealand",
+        "Oceania – Melanesia",
+        "Oceania – Micronesia",
+        "Oceania – Polynesia",
+        "Antarctica",
+    ];
 
     function serviceOptionsHtml(selectedId) {
         const opts = serviceTypesCache.map((s) => {
@@ -2557,6 +2604,7 @@
             const portSafe = escapeHtml(l.port ?? "");
             const statusSafe = escapeHtml(l.status || "");
             const svcLabel = l.service_description || formatServiceLabel(l.service_id);
+            const locationLabel = l.location || "—";
             const laneCount = Number(l.lanes || 1);
             const laneLabel = String(laneCount);
             const svcSelect = `<div class="muted">
@@ -2700,6 +2748,7 @@
                     <td>
                         ${svcSelect}
                     </td>
+                    <td>${escapeHtml(locationLabel)}</td>
                     <td class="mono">${laneLabel}</td>
                     <td class="mono">${portSafe || "–"}</td>
                     <td class="listener-actions-cell col-actions">
@@ -2710,7 +2759,7 @@
                     </td>
                 </tr>
                 <tr class="listener-sub">
-                    <td colspan="5">
+                    <td colspan="6">
                     <div class="muted small" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; align-items:start;">
                         <div style="display:flex; flex-direction:column; gap:4px;">
                             <div class="muted small">Endpoint:</div>
@@ -2749,12 +2798,12 @@
                     </td>
                 </tr>
                 <tr class="listener-sub">
-                    <td colspan="5">
+                    <td colspan="6">
                         <div class="muted small">Top services:</div>
                         <div class="muted">${topServicesDisplay}</div>
                     </td>
                 </tr>
-                <tr class="listener-spacer"><td colspan="5"></td></tr>
+                <tr class="listener-spacer"><td colspan="6"></td></tr>
                 </tbody>`;
             }
             const statusDot = `<span class="status-dot ${String(l.status).toLowerCase() === "active" ? "dot-ok" : "dot-err"}"></span>`;
@@ -2764,6 +2813,7 @@
             <tr class="listener-main" onclick="toggleListenerOpen('${l.id}')">
                 <td class="col-status" style="vertical-align: middle;"><span class="muted small" style="font-size:20px; display:inline-block; width:20px; color: #ffffff; line-height:1;">${caret}</span> ${statusDot}</td>
                 <td>${escapeHtml(svcLabel || "—")}</td>
+                <td>${escapeHtml(locationLabel)}</td>
                 <td class="mono">${laneLabel}</td>
                 <td class="mono">${portSafe || "–"}</td>
                 <td class="listener-actions-cell col-actions">
@@ -2776,7 +2826,7 @@
             </tr>
             ${isOpen ? `
             <tr class="listener-sub">
-                <td colspan="5">
+                <td colspan="6">
                     <div class="muted small" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; align-items:start;">
                         <div style="display:flex; flex-direction:column; gap:4px;">
                             <div class="muted small">Endpoint:</div>
@@ -2794,7 +2844,7 @@
                 </td>
             </tr>
             <tr class="listener-sub">
-                <td colspan="5">
+                <td colspan="6">
                     <div class="muted small" style="padding-bottom:4px;">Polling Options:</div>
                     <div class="muted small"><span style="color:#fff;"><strong>
                         Method: ${escapeHtml((l.health_method || "POST").toString().toUpperCase())}
@@ -2804,19 +2854,19 @@
                 </td>
             </tr>
             <tr class="listener-sub">
-                <td colspan="5">
+                <td colspan="6">
                     <div class="muted small">Top services:</div>
                     <div class="muted">${topServicesDisplay}</div>
                 </td>
             </tr>
-            <tr class="listener-spacer"><td colspan="5"></td></tr>` : ""}
-            ${!isOpen ? `<tr class="listener-spacer"><td colspan="5"></td></tr>` : ""}
+            <tr class="listener-spacer"><td colspan="6"></td></tr>` : ""}
+            ${!isOpen ? `<tr class="listener-spacer"><td colspan="6"></td></tr>` : ""}
             </tbody>`;
         }).join("");
         container.innerHTML = `<div class="table-wrap">
             <table class="table listeners-table">
                 <thead>
-                    <tr><th class="col-status">Status</th><th>Service Type</th><th>Lanes</th><th>Port</th><th class="col-actions">Actions</th></tr>
+                    <tr><th class="col-status">Status</th><th>Service Type</th><th>Location</th><th>Lanes</th><th>Port</th><th class="col-actions">Actions</th></tr>
                 </thead>
                 <tbody>${rows}</tbody>
             </table>
@@ -2826,11 +2876,15 @@
     function resetListenerForm() {
         const svc = document.getElementById("listenerService");
         if (svc) svc.value = "";
+        const loc = document.getElementById("listenerLocation");
+        if (loc) loc.value = "";
+        selectLocationOption("");
     }
 
     async function submitListenerForm(evt) {
         evt.preventDefault();
         const svcId = document.getElementById("listenerService")?.value || "";
+        const locationVal = document.getElementById("listenerLocation")?.value || "";
         if (!svcId) {
             alert("Please select a service type before adding a listener.");
             return;
@@ -2849,6 +2903,7 @@
             if (defaults.payload) body.health_payload = defaults.payload;
         }
         if (svcId) body.service_id = svcId;
+        if (locationVal) body.location = locationVal;
         try {
             const res = await fetch(apiUrl("/api/listeners"), {
                 method: "POST",
@@ -3488,6 +3543,7 @@
                 health_header: defaults.header,
             };
             let workingTop = dedupTopServices(JSON.parse(JSON.stringify(top)));
+            workingTop = sortProvidersByLocationAndPrice(workingTop, listener?.location || "");
             for (const ts of workingTop) {
                 const providerLabel = ts?.provider_moniker || "(unknown)";
                 appendPollLog(`Provider: ${providerLabel}`);
@@ -3580,6 +3636,7 @@
                 return ts;
             });
         }
+        const preferredLocation = listener?.location || "";
         const sorted = [...latestTop].sort((a, b) => {
             const statusScore = (x) => {
                 const s = String(x?.status || "").toLowerCase();
@@ -3587,6 +3644,7 @@
                 if (s === "down") return 2;
                 return 1; // unknown
             };
+            const locScore = (x) => locationMatchScore(preferredLocation, x?.provider_location);
             const price = (x) => {
                 const amt = x?.pay_as_you_go_rate?.amount;
                 const n = parseInt(amt, 10);
@@ -3600,6 +3658,9 @@
             const sA = statusScore(a);
             const sB = statusScore(b);
             if (sA !== sB) return sA - sB; // Up first, Down last
+            const lA = locScore(a);
+            const lB = locScore(b);
+            if (lA !== lB) return lA - lB; // preferred location first
 
             const pA = price(a);
             const pB = price(b);
@@ -3744,6 +3805,140 @@
         if (first) {
             selectServiceOption(first);
         }
+    }
+
+    function renderLocationOptions(filterText = "") {
+        const optionsEl = document.getElementById("locComboOptions");
+        const hiddenSelect = document.getElementById("listenerLocation");
+        if (!optionsEl || !hiddenSelect) return;
+        const filter = filterText.toLowerCase();
+        let html = "";
+        hiddenSelect.innerHTML = `<option value="">Select a region</option>`;
+        (LOCATION_OPTIONS || []).forEach((label) => {
+            const lower = label.toLowerCase();
+            if (filter && !lower.includes(filter)) return;
+            const safeLabel = escapeHtml(label);
+            html += `<div class="combo-option" data-id="${safeLabel}" onclick="selectLocationOption('${safeLabel}')">${safeLabel}</div>`;
+            const opt = document.createElement("option");
+            opt.value = label;
+            opt.textContent = label;
+            hiddenSelect.appendChild(opt);
+        });
+        optionsEl.innerHTML = html || `<div class="combo-option muted">No matches</div>`;
+    }
+
+    function selectLocationOption(locationVal) {
+        const hiddenSelect = document.getElementById("listenerLocation");
+        const display = document.getElementById("locComboSelected");
+        if (hiddenSelect) {
+            hiddenSelect.value = locationVal || "";
+        }
+        const label = locationVal || "Select a region";
+        if (display) display.textContent = label;
+        closeLocationMenu();
+    }
+
+    function toggleLocationMenu(e) {
+        e?.stopPropagation();
+        const menu = document.getElementById("locComboMenu");
+        if (!menu) return;
+        if (menu.classList.contains("hidden")) {
+            openLocationMenu();
+        } else {
+            closeLocationMenu();
+        }
+    }
+
+    function openLocationMenu() {
+        const menu = document.getElementById("locComboMenu");
+        const search = document.getElementById("locComboSearch");
+        if (menu) menu.classList.remove("hidden");
+        locationMenuOpen = true;
+        renderLocationOptions(search ? search.value : "");
+        if (search) {
+            search.value = "";
+            search.focus();
+        }
+        document.addEventListener("click", handleOutsideLocationMenu, { once: true });
+    }
+
+    function closeLocationMenu() {
+        const menu = document.getElementById("locComboMenu");
+        if (menu) menu.classList.add("hidden");
+        locationMenuOpen = false;
+    }
+
+    function handleOutsideLocationMenu(evt) {
+        if (!locationMenuOpen) return;
+        const menu = document.getElementById("locComboMenu");
+        const display = document.getElementById("locComboDisplay");
+        if (!menu || !display) return;
+        if (menu.contains(evt.target) || display.contains(evt.target)) {
+            document.addEventListener("click", handleOutsideLocationMenu, { once: true });
+            return;
+        }
+        closeLocationMenu();
+    }
+
+    function filterLocationOptions() {
+        const search = document.getElementById("locComboSearch");
+        renderLocationOptions(search ? search.value : "");
+    }
+
+    function populateLocationSelect() {
+        renderLocationOptions("");
+        selectLocationOption("");
+    }
+
+    function normalizeLocationValue(value) {
+        return String(value || "")
+            .trim()
+            .replace(/[–—]/g, "-")
+            .replace(/\s*-\s*/g, " - ")
+            .toLowerCase();
+    }
+
+    function locationFamily(value) {
+        const norm = normalizeLocationValue(value);
+        if (norm.includes(" - ")) {
+            return norm.split(" - ")[0].trim();
+        }
+        return norm;
+    }
+
+    function locationMatchScore(preferred, candidate) {
+        if (!preferred) return 0;
+        const pref = normalizeLocationValue(preferred);
+        const cand = normalizeLocationValue(candidate);
+        if (!cand) return 1;
+        if (pref.includes(" - ")) {
+            return cand === pref ? 0 : 1;
+        }
+        return locationFamily(cand) === pref ? 0 : 1;
+    }
+
+    function sortProvidersByLocationAndPrice(list, preferredLocation) {
+        if (!preferredLocation) return list;
+        const pref = normalizeLocationValue(preferredLocation);
+        if (!pref) return list;
+        const items = [...list];
+        items.sort((a, b) => {
+            const locA = locationMatchScore(pref, a?.provider_location);
+            const locB = locationMatchScore(pref, b?.provider_location);
+            if (locA !== locB) return locA - locB;
+            const price = (x) => {
+                const amt = x?.pay_as_you_go_rate?.amount;
+                const n = parseInt(amt, 10);
+                return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
+            };
+            const pA = price(a);
+            const pB = price(b);
+            if (pA !== pB) return pA - pB;
+            const pkA = String(a?.provider_pubkey || "");
+            const pkB = String(b?.provider_pubkey || "");
+            return pkA.localeCompare(pkB);
+        });
+        return items;
     }
 
     function buildStatusSelect(selectedVal, elementId) {

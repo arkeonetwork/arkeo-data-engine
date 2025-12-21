@@ -4648,6 +4648,47 @@ def _provider_moniker_from_meta(p: dict | None) -> str | None:
     return moniker or None
 
 
+def _provider_location_from_meta(p: dict | None) -> str | None:
+    if not isinstance(p, dict):
+        return None
+    meta = p.get("metadata") or {}
+    location = (
+        (meta.get("config") or {}).get("location")
+        or meta.get("location")
+        or (p.get("provider") or {}).get("location")
+        or p.get("location")
+    )
+    return location or None
+
+
+def _normalize_location_value(value: str | None) -> str:
+    if not value:
+        return ""
+    val = str(value).strip()
+    val = val.replace("–", "-").replace("—", "-")
+    val = re.sub(r"\s*-\s*", " - ", val)
+    return val.lower()
+
+
+def _location_family(value: str | None) -> str:
+    norm = _normalize_location_value(value)
+    if " - " in norm:
+        return norm.split(" - ", 1)[0].strip()
+    return norm
+
+
+def _location_match_score(preferred: str | None, candidate: str | None) -> int:
+    if not preferred:
+        return 0
+    pref = _normalize_location_value(preferred)
+    cand = _normalize_location_value(candidate)
+    if not cand:
+        return 1
+    if " - " in pref:
+        return 0 if cand == pref else 1
+    return 0 if _location_family(cand) == pref else 1
+
+
 def _build_active_maps():
     """Return (active_map, provider_meta_map, svc_lookup) for enrichment."""
     active_map = {}
@@ -4702,6 +4743,8 @@ def _enrich_top_services_for_response(top: list, svc_id: str, active_map: dict, 
                 entry["sentinel_url"] = _sentinel_from_metadata_uri(mu)
         if not entry.get("provider_moniker"):
             entry["provider_moniker"] = _provider_moniker_from_meta(provider_meta_map.get(pk)) or _active_provider_moniker(pk) or pk
+        if not entry.get("provider_location"):
+            entry["provider_location"] = _provider_location_from_meta(provider_meta_map.get(pk)) or entry.get("provider_location")
         if "pay_as_you_go_rate" not in entry or entry.get("pay_as_you_go_rate") is None:
             if isinstance(raw, dict):
                 entry["pay_as_you_go_rate"] = _extract_paygo_rate(raw)
@@ -7423,12 +7466,13 @@ def _min_payg_rate(raw: dict) -> tuple[int | None, str | None]:
     return best_amt, best_denom
 
 
-def _top_active_services_by_payg(service_id: str, limit: int = 3) -> list[dict]:
-    """Return up to `limit` active services for the given service_id, sorted by lowest pay-as-you-go rate."""
+def _top_active_services_by_payg(service_id: str, limit: int = 3, preferred_location: str | None = None) -> list[dict]:
+    """Return up to `limit` active services for the given service_id, sorted by location then pay-as-you-go rate."""
     if not service_id:
         return []
     # build provider lookup for moniker/status
     provider_lookup: dict[str, str] = {}
+    provider_location_lookup: dict[str, str] = {}
     try:
         ap = _load_cached("active_providers")
         prov_list = ap.get("providers") if isinstance(ap, dict) else []
@@ -7446,6 +7490,9 @@ def _top_active_services_by_payg(service_id: str, limit: int = 3) -> list[dict]:
                     or (p.get("provider") or {}).get("moniker")
                 )
                 provider_lookup[pk] = moniker or ""
+                loc = _provider_location_from_meta(p)
+                if loc:
+                    provider_location_lookup[pk] = loc
     except Exception:
         pass
     try:
@@ -7473,10 +7520,12 @@ def _top_active_services_by_payg(service_id: str, limit: int = 3) -> list[dict]:
             min_dur = raw.get("min_contract_duration")
             max_dur = raw.get("max_contract_duration")
         amt, denom = _min_payg_rate(raw or {})
-        moniker = provider_lookup.get(e.get("provider_pubkey") or "") or "(Inactive)"
+        provider_pk = e.get("provider_pubkey") or ""
+        moniker = provider_lookup.get(provider_pk) or "(Inactive)"
+        provider_location = provider_location_lookup.get(provider_pk) or ""
         candidates.append(
             {
-                "provider_pubkey": e.get("provider_pubkey"),
+                "provider_pubkey": provider_pk,
                 "provider_moniker": moniker,
                 "metadata_uri": e.get("metadata_uri"),
                 "pay_as_you_go_rate": {"amount": amt, "denom": denom},
@@ -7484,6 +7533,7 @@ def _top_active_services_by_payg(service_id: str, limit: int = 3) -> list[dict]:
                 "min_contract_duration": min_dur,
                 "max_contract_duration": max_dur,
                 "settlement_duration": settle,
+                "provider_location": provider_location,
                 "raw": e,
             }
         )
@@ -7493,7 +7543,8 @@ def _top_active_services_by_payg(service_id: str, limit: int = 3) -> list[dict]:
         amt = rate.get("amount")
         # push None to bottom by treating None as very large
         amt_key = amt if isinstance(amt, int) else (1 << 62)
-        return (amt_key, item.get("provider_pubkey") or "")
+        loc_score = _location_match_score(preferred_location, item.get("provider_location"))
+        return (loc_score, amt_key, item.get("provider_pubkey") or "")
 
     candidates.sort(key=_sort_key)
     return candidates[:limit]
@@ -7811,6 +7862,9 @@ def _sanitize_listener_payload(payload: dict, existing_ports: set[int], current_
     service_id = str(service_id_val).strip() if service_id_val not in (None, "") else ""
     provider_pubkey = (payload.get("provider_pubkey") or "").strip()
     sentinel_url = (payload.get("sentinel_url") or "").strip()
+    location = None
+    if "location" in payload:
+        location = (payload.get("location") or "").strip()
     whitelist_ips = (payload.get("whitelist_ips") or "").strip()
     cors_allowed_origins = None
     if "cors_allowed_origins" in payload or "corsAllowedOrigins" in payload:
@@ -7840,6 +7894,7 @@ def _sanitize_listener_payload(payload: dict, existing_ports: set[int], current_
         "service_id": service_id,
         "provider_pubkey": provider_pubkey,
         "sentinel_url": sentinel_url,
+        "location": location,
         "whitelist_ips": whitelist_ips,
         "cors_allowed_origins": cors_allowed_origins,
         "health_method": health_method,
@@ -7888,7 +7943,13 @@ def create_listener():
     if port is None:
         return jsonify({"error": "no ports available in configured range"}), 400
     now = _timestamp()
-    best = _normalize_top_services(_top_active_services_by_payg(clean.get("service_id") or "", limit=5))
+    best = _normalize_top_services(
+        _top_active_services_by_payg(
+            clean.get("service_id") or "",
+            limit=5,
+            preferred_location=clean.get("location") or None,
+        )
+    )
     # primary provider comes from top_services ordering
     raw_entry = {
         "id": payload.get("id") or str(int(time.time() * 1000)),
@@ -7896,6 +7957,7 @@ def create_listener():
         "status": clean["status"],
         "port": port,
         "service_id": clean.get("service_id") or "",
+        "location": clean.get("location") or "",
         "top_services": best,
         "whitelist_ips": clean.get("whitelist_ips") or "",
         "cors_allowed_origins": clean.get("cors_allowed_origins") if clean.get("cors_allowed_origins") is not None else CORS_ALLOWED_ORIGINS,
@@ -7937,7 +7999,19 @@ def update_listener(listener_id: str):
     }
     if clean.get("service_id") and str(clean["service_id"]) in existing_service_ids:
         return jsonify({"error": "service_already_used"}), 400
-    best = _top_active_services_by_payg(clean.get("service_id") or "", limit=5)
+    existing_location = None
+    for l in listeners:
+        if not isinstance(l, dict):
+            continue
+        if str(l.get("id")) == str(listener_id):
+            existing_location = l.get("location")
+            break
+    preferred_location = clean.get("location") if clean.get("location") is not None else existing_location
+    best = _top_active_services_by_payg(
+        clean.get("service_id") or "",
+        limit=5,
+        preferred_location=preferred_location or None,
+    )
     updated = None
     old_snapshot = None
     provider_pk = (clean.get("provider_pubkey") or "").strip() or None
@@ -7952,6 +8026,8 @@ def update_listener(listener_id: str):
         l["target"] = ""
         l["status"] = clean["status"]
         l["service_id"] = clean.get("service_id") or ""
+        if clean.get("location") is not None:
+            l["location"] = clean.get("location") or ""
         # top services ordering: use custom if provided, else keep existing unless service changed or empty
         existing_top = l.get("top_services") if isinstance(l.get("top_services"), list) else []
         if custom_top is not None:
@@ -8158,7 +8234,10 @@ def refresh_listener_top_services(listener_id: str):
             if str(l.get("id")) != str(listener_id):
                 continue
             svc_id = l.get("service_id") or ""
-            best = _normalize_top_services(_top_active_services_by_payg(svc_id, limit=3))
+            preferred_location = l.get("location") or None
+            best = _normalize_top_services(
+                _top_active_services_by_payg(svc_id, limit=3, preferred_location=preferred_location)
+            )
             l["top_services"] = best
             l["updated_at"] = _timestamp()
             updated = l
