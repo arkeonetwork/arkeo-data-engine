@@ -95,6 +95,7 @@ def build_commands() -> Dict[str, List[str]]:
     if ARKEOD_NODE:
         base.extend(["--node", ARKEOD_NODE])
     return {
+        "status": [*base, "status"],
         "provider-services": [*base, "query", "arkeo", "list-providers", "-o", "json"],
         "provider-contracts": [*base, "query", "arkeo", "list-contracts", "-o", "json"],
         # services/types are fetched via REST API (no pagination)
@@ -1027,6 +1028,31 @@ def fetch_once(commands: Dict[str, List[str]] | None = None, record_status: bool
                 if code != 0:
                     ok = False
                     fatal_errors.append(f"{name} exit={code}")
+            if name == "status":
+                status_payload: Dict[str, Any] = {
+                    "ok": payload.get("exit_code") == 0,
+                    "height": None,
+                    "node": ARKEOD_NODE,
+                    "synced_at": timestamp(),
+                    "synced_at_unix": time.time(),
+                }
+                if payload.get("exit_code") == 0:
+                    try:
+                        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+                        status_payload["status"] = data
+                        sync_info = data.get("sync_info") or data.get("SyncInfo") or {}
+                        height = sync_info.get("latest_block_height") or sync_info.get("latest_block")
+                        if height is not None:
+                            status_payload["height"] = int(height)
+                        else:
+                            status_payload["ok"] = False
+                            status_payload["error"] = "no height in status"
+                    except Exception as e:
+                        status_payload["ok"] = False
+                        status_payload["error"] = f"status parse error: {e}"
+                else:
+                    status_payload["error"] = payload.get("error") or "status failed"
+                write_cache("arkeo_status", status_payload)
             # If provider-services succeeded, update metadata cache and annotate payload
             if name == "provider-services" and payload.get("exit_code") == 0:
                 metadata_cache = _update_metadata_cache_from_providers(payload)
@@ -1060,7 +1086,8 @@ def fetch_once(commands: Dict[str, List[str]] | None = None, record_status: bool
                                     s["metadata_uri_active"] = True
                 except Exception:
                     pass
-            write_cache(name, payload)
+            if name != "status":
+                write_cache(name, payload)
             results[name] = payload
             stage_times[name] = time.time() - t0
         # expose metadata cache in results for UI visibility

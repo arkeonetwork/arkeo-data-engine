@@ -44,6 +44,8 @@ LISTENER_PORT_END = int(os.getenv("LISTENER_PORT_END", "62100"))
 LISTENER_PORT_CONFIG = os.path.join(CACHE_DIR, "listener_port_config.json")
 ACTIVE_SERVICE_TYPES_FILE = os.path.join(CACHE_DIR, "active_service_types.json")
 SUBSCRIBER_INFO_FILE = os.path.join(CACHE_DIR, "subscriber_info.json")
+ARKEO_STATUS_FILE = os.path.join(CACHE_DIR, "arkeo_status.json")
+ARKEO_STATUS_TTL = float(os.getenv("ARKEO_STATUS_TTL", "30.0"))
 LOG_DIR = os.path.join(CACHE_DIR, "logs")
 NONCE_STORE_DIR = os.path.join(CACHE_DIR, "nonce_store")
 ADMIN_PASSWORD_PATH = os.getenv("ADMIN_PASSWORD_PATH") or (
@@ -183,7 +185,18 @@ _NONCE_LOCK = threading.Lock()
 
 # Single-lane executor primitives (serialize nonce/sign/forward per listener)
 class WorkItem:
-    def __init__(self, method, path, query, headers, body, client_ip, deadline: float | None = None):
+    def __init__(
+        self,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        client_ip,
+        deadline: float | None = None,
+        raw_path: str | None = None,
+        raw_query: str | None = None,
+    ):
         self.method = method
         self.path = path
         self.query = query
@@ -194,6 +207,8 @@ class WorkItem:
         self.cancelled = False
         self.created_at = time.time()
         self.deadline = deadline
+        self.raw_path = raw_path
+        self.raw_query = raw_query
 
 
 class NonceStore:
@@ -2281,6 +2296,10 @@ PROXY_MAX_DEPOSIT = os.getenv("PROXY_MAX_DEPOSIT", "50000000")
 PROXY_SIGN_TEMPLATE = os.getenv("PROXY_SIGN_TEMPLATE", "{contract_id}:{nonce}:")
 PROXY_ARKAUTH_FORMAT = os.getenv("PROXY_ARKAUTH_FORMAT", "4part")
 PROXY_TIMEOUT_SECS = int(os.getenv("PROXY_TIMEOUT_SECS", "15"))
+PROXY_BYPASS_TIMEOUT = _safe_float(os.getenv("PROXY_BYPASS_TIMEOUT") or "3.0", 3.0)
+PROXY_BYPASS_COOLDOWN = _safe_float(os.getenv("PROXY_BYPASS_COOLDOWN") or "60.0", 60.0)
+PROXY_PROVIDER_COOLDOWN = _safe_float(os.getenv("PROXY_PROVIDER_COOLDOWN") or "60.0", 60.0)
+PROXY_HEIGHT_SKEW = int(os.getenv("PROXY_HEIGHT_SKEW", "6"))
 PROXY_WHITELIST_IPS = os.getenv("PROXY_WHITELIST_IPS", "0.0.0.0")
 PROXY_TRUST_FORWARDED = str(os.getenv("PROXY_TRUST_FORWARDED", "true")).lower() in ("1", "true", "yes", "on")
 PROXY_DECORATE_RESPONSE = str(os.getenv("PROXY_DECORATE_RESPONSE", "true")).lower() in ("1", "true", "yes", "on")
@@ -2998,21 +3017,31 @@ def version():
 @app.get("/api/block-height")
 def block_height():
     """Return the latest block height from the configured node."""
-    cmd = ["arkeod", "--home", ARKEOD_HOME]
-    if ARKEOD_NODE:
-        cmd.extend(["--node", ARKEOD_NODE])
-    cmd.append("status")
-    code, out = run_list(cmd)
-    if code != 0:
-        return jsonify({"error": "failed to fetch status", "detail": out, "cmd": cmd}), 500
-    try:
-        data = json.loads(out)
-        # handle common casing
-        sync_info = data.get("SyncInfo") or data.get("sync_info") or {}
-        height = sync_info.get("latest_block_height") or sync_info.get("latest_block")
-        return jsonify({"height": str(height) if height is not None else None, "status": data})
-    except json.JSONDecodeError:
-        return jsonify({"error": "invalid JSON from status", "detail": out, "cmd": cmd}), 500
+    cached = _read_arkeo_status_cache(ARKEO_STATUS_TTL)
+    if cached and cached.get("ok") and cached.get("height") is not None:
+        return jsonify(
+            {
+                "height": str(cached.get("height")),
+                "status": cached.get("status") or {},
+                "synced_at": cached.get("synced_at"),
+                "synced_at_unix": cached.get("synced_at_unix"),
+                "cached": True,
+            }
+        )
+    height = _get_current_height(ARKEOD_NODE)
+    cached = _read_arkeo_status_cache(ARKEO_STATUS_TTL)
+    if cached and cached.get("ok") and cached.get("height") is not None:
+        return jsonify(
+            {
+                "height": str(cached.get("height")),
+                "status": cached.get("status") or {},
+                "synced_at": cached.get("synced_at"),
+                "synced_at_unix": cached.get("synced_at_unix"),
+                "cached": True,
+            }
+        )
+    detail = cached.get("error") if isinstance(cached, dict) else None
+    return jsonify({"error": "failed to fetch status", "detail": detail}), 500
 
 
 def _latest_block_height() -> tuple[str | None, str | None]:
@@ -4791,6 +4820,41 @@ def _enrich_listener_for_response(listener: dict) -> dict:
                     sent = _sentinel_from_metadata_uri(mu)
             if sent:
                 l["sentinel_url"] = sent
+    bypass_pw = l.get("bypass_password") or ""
+    l["bypass_password_set"] = bool(bypass_pw)
+    if "bypass_password" in l:
+        l.pop("bypass_password", None)
+    try:
+        port_val = l.get("port")
+        port = int(port_val) if port_val is not None else None
+    except Exception:
+        port = None
+    if port is not None:
+        try:
+            entry = _LISTENER_SERVERS.get(port)
+            srv = entry.get("server") if isinstance(entry, dict) else None
+        except Exception:
+            srv = None
+        if srv is not None:
+            bypass_last_ms = getattr(srv, "bypass_last_ms", None)
+            bypass_last_code = getattr(srv, "bypass_last_code", None)
+            bypass_last_at = getattr(srv, "bypass_last_at", None)
+            if bypass_last_ms is None:
+                last_timings = getattr(srv, "last_timings", None)
+                if isinstance(last_timings, dict) and last_timings.get("bypass"):
+                    bypass_last_ms = last_timings.get("total_ms")
+            if bypass_last_ms is not None:
+                l["bypass_last_ms"] = bypass_last_ms
+            if bypass_last_code is not None:
+                l["bypass_last_code"] = bypass_last_code
+            if bypass_last_at is not None:
+                l["bypass_last_at"] = bypass_last_at
+            try:
+                cooldown_until = getattr(srv, "bypass_cooldown_until", None)
+                if cooldown_until:
+                    l["bypass_cooldown_until"] = cooldown_until
+            except Exception:
+                pass
     if not l.get("health_method"):
         l["health_method"] = "POST"
     if l.get("health_payload") is None:
@@ -5006,6 +5070,11 @@ def _start_listener_server(listener: dict) -> tuple[bool, str | None]:
         "sign_template": listener.get("sign_template", PROXY_SIGN_TEMPLATE),
         "arkauth_format": listener.get("arkauth_format", PROXY_ARKAUTH_FORMAT),
         "timeout_secs": listener.get("timeout_secs", PROXY_TIMEOUT_SECS),
+        "bypass_uri": listener.get("bypass_uri") or "",
+        "bypass_username": listener.get("bypass_username") or "",
+        "bypass_password": listener.get("bypass_password") or "",
+        "bypass_timeout_sec": listener.get("bypass_timeout_sec", PROXY_BYPASS_TIMEOUT),
+        "bypass_cooldown_sec": listener.get("bypass_cooldown_sec", PROXY_BYPASS_COOLDOWN),
         "top_services": listener.get("top_services") or [],
         "cors_allowed_origins": cors_override if cors_override is not None else CORS_ALLOWED_ORIGINS,
         "last_contracts": {
@@ -5090,6 +5159,11 @@ def _ensure_listener_runtime(listener: dict, previous_port: int | None = None, p
             "sentinel_url",
             "top_services",
             "whitelist_ips",
+            "bypass_uri",
+            "bypass_username",
+            "bypass_password",
+            "bypass_timeout_sec",
+            "bypass_cooldown_sec",
         ]
         for k in keys_to_check:
             if previous_entry.get(k) != listener.get(k):
@@ -5764,20 +5838,81 @@ def _resolve_listener_target(listener: dict) -> tuple[str | None, str | None, st
     return pk, sent, mon
 
 
+def _read_arkeo_status_cache(max_age_sec: float | None = None) -> dict | None:
+    try:
+        with open(ARKEO_STATUS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        if max_age_sec is not None:
+            ts = float(data.get("synced_at_unix") or 0)
+            if ts <= 0:
+                return None
+            if (time.time() - ts) > float(max_age_sec):
+                return None
+        return data
+    except Exception:
+        return None
+
+
+def _write_arkeo_status(ok: bool, node: str, height: int | None = None, error: str | None = None, status: dict | None = None) -> None:
+    payload = {
+        "ok": ok,
+        "height": height,
+        "node": node,
+        "synced_at": _timestamp(),
+        "synced_at_unix": time.time(),
+    }
+    if error:
+        payload["error"] = error
+    if status is not None:
+        payload["status"] = status
+    tmp_path = f"{ARKEO_STATUS_FILE}.tmp"
+    try:
+        Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=True, indent=2)
+        os.replace(tmp_path, ARKEO_STATUS_FILE)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 def _get_current_height(node: str) -> int:
+    cached = _read_arkeo_status_cache(ARKEO_STATUS_TTL)
+    if cached is not None:
+        if cached.get("ok") and cached.get("height") is not None:
+            return _safe_int(cached.get("height"))
     cmd = ["arkeod", "--home", ARKEOD_HOME]
     if node:
         cmd.extend(["--node", node])
     cmd.append("status")
     code, out = run_list(cmd)
     if code != 0:
+        _write_arkeo_status(False, node, None, f"status exit={code}")
         return 0
     try:
         data = json.loads(out)
         sync_info = data.get("sync_info") or data.get("SyncInfo") or {}
-        return _safe_int(sync_info.get("latest_block_height") or sync_info.get("latest_block"))
+        height = _safe_int(sync_info.get("latest_block_height") or sync_info.get("latest_block"))
+        _write_arkeo_status(True, node, height, None, data)
+        return height
     except Exception:
+        _write_arkeo_status(False, node, None, "invalid status json")
         return 0
+
+
+def _get_height_with_source(node: str) -> tuple[int, bool]:
+    cached = _read_arkeo_status_cache(ARKEO_STATUS_TTL)
+    if cached is not None and cached.get("ok") and cached.get("height") is not None:
+        return _safe_int(cached.get("height")), True
+    return _get_current_height(node), False
 
 
 def _fetch_contracts(node: str, timeout: int | None = None, active_only: bool = True, limit: int | None = None, client_filter: str | None = None) -> list:
@@ -5822,8 +5957,19 @@ def _fetch_contracts(node: str, timeout: int | None = None, active_only: bool = 
     return filtered
 
 
-def _select_active_contract(contracts: list, client_pub: str, svc_id: int, cur_height: int, provider_filter: str | None = None):
+def _select_active_contract(
+    contracts: list,
+    client_pub: str,
+    svc_id: int,
+    cur_height: int,
+    provider_filter: str | None = None,
+    height_skew: int = 0,
+):
     """Pick newest usable contract for this client/service (optionally provider)."""
+    try:
+        effective_height = cur_height + int(height_skew or 0)
+    except Exception:
+        effective_height = cur_height
     def is_active(c):
         if not isinstance(c, dict):
             return False
@@ -5837,7 +5983,7 @@ def _select_active_contract(contracts: list, client_pub: str, svc_id: int, cur_h
             return False
         if _safe_int(c.get("deposit")) <= 0:
             return False
-        if (_safe_int(c.get("height")) + _safe_int(c.get("duration"))) <= cur_height:
+        if (_safe_int(c.get("height")) + _safe_int(c.get("duration"))) <= effective_height:
             return False
         return True
 
@@ -5899,6 +6045,10 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
     service_path = work.path or ""
     query_string = work.query or ""
     body = work.body or b""
+    raw_path = getattr(work, "raw_path", None) or "/"
+    raw_query = getattr(work, "raw_query", None)
+    if raw_query is None:
+        raw_query = query_string
     client_ip = work.client_ip or ""
     queue_wait_ms = 0
     try:
@@ -5956,6 +6106,140 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
             "body": json.dumps({"error": "ip not whitelisted", "ip": client_ip}),
             "headers": {"Content-Type": "application/json"},
         }
+
+    bypass_uri = (cfg.get("bypass_uri") or "").strip()
+    bypass_skip_reason = None
+    try:
+        if _req_header("X-Arkeo-Force-Provider"):
+            bypass_skip_reason = "force_provider"
+        bypass_hdr = _req_header("X-Arkeo-Bypass")
+        if bypass_hdr and str(bypass_hdr).strip().lower() in ("0", "false", "no", "off", "disable", "disabled"):
+            bypass_skip_reason = "header_disabled"
+    except Exception:
+        bypass_skip_reason = None
+
+    if bypass_uri and bypass_skip_reason:
+        _log("info", f"bypass skipped ({bypass_skip_reason})")
+    elif bypass_uri:
+        bypass_timeout = _safe_float(cfg.get("bypass_timeout_sec"), PROXY_BYPASS_TIMEOUT)
+        if bypass_timeout <= 0:
+            bypass_timeout = PROXY_BYPASS_TIMEOUT
+        bypass_cooldown = _safe_float(cfg.get("bypass_cooldown_sec"), PROXY_BYPASS_COOLDOWN)
+        if bypass_cooldown < 0:
+            bypass_cooldown = 0.0
+        bypass_username = cfg.get("bypass_username") or ""
+        bypass_password = cfg.get("bypass_password") or ""
+        try:
+            now = time.time()
+            cooldown_until = 0.0
+            if server_ref is not None:
+                cooldown_until = float(getattr(server_ref, "bypass_cooldown_until", 0.0) or 0.0)
+            if cooldown_until and now < cooldown_until:
+                _log("warning", f"bypass cooldown active; skipping for {cooldown_until - now:.0f}s")
+                raise BypassError("cooldown_active")
+            bypass_log_url = _redact_url_userinfo(bypass_uri)
+            _log("info", f"bypass attempt url={bypass_log_url} timeout={bypass_timeout:.1f}s")
+            code, resp_body, resp_hdrs, fwd_url, _fwd_headers = _forward_to_bypass(
+                bypass_uri,
+                raw_path,
+                raw_query,
+                body,
+                method=method,
+                timeout=bypass_timeout,
+                headers=getattr(work, "headers", None),
+                username=bypass_username,
+                password=bypass_password,
+            )
+            if not isinstance(resp_hdrs, dict):
+                resp_hdrs = {"Content-Type": "application/json"}
+            resp_hdrs.setdefault("Content-Type", "application/json")
+            try:
+                hop_headers = {
+                    "connection",
+                    "keep-alive",
+                    "proxy-authenticate",
+                    "proxy-authorization",
+                    "proxy-connection",
+                    "te",
+                    "trailers",
+                    "transfer-encoding",
+                    "upgrade",
+                    "content-length",
+                }
+                for hk in list(resp_hdrs.keys()):
+                    if str(hk).lower() in hop_headers:
+                        resp_hdrs.pop(hk, None)
+                resp_hdrs["X-Arkeo-Bypass-Used"] = "1"
+            except Exception:
+                pass
+            total_ms = int((time.time() - t_start) * 1000)
+            other_ms = total_ms - queue_wait_ms
+            if other_ms < 0:
+                other_ms = 0
+            try:
+                if server_ref is not None:
+                    timings_payload = {
+                        "total_ms": total_ms,
+                        "queue_wait_ms": queue_wait_ms,
+                        "height_ms": 0,
+                        "contract_fetch_ms": 0,
+                        "contract_select_ms": 0,
+                        "cors_ms": 0,
+                        "cors_ok": None,
+                        "nonce_store_ms": 0,
+                        "nonce_prep_ms": 0,
+                        "nonce_persist_ms": 0,
+                        "sign_ms": 0,
+                        "sentinel_forward_ms": other_ms,
+                        "other_ms": 0,
+                        "auto_create": False,
+                        "bypass": True,
+                    }
+                    try:
+                        want_timings = False
+                        val = _req_header("X-Arkeo-Return-Timings")
+                        if val is not None and str(val).strip().lower() not in ("", "0", "false", "no", "off", "null"):
+                            want_timings = True
+                        if want_timings:
+                            resp_hdrs["X-Arkeo-Timings"] = json.dumps(timings_payload, separators=(",", ":"))
+                    except Exception:
+                        pass
+                    server_ref.last_code = code
+                    server_ref.last_timings = timings_payload
+                    server_ref.bypass_last_ms = total_ms
+                    server_ref.bypass_last_code = code
+                    server_ref.bypass_last_at = time.time()
+                    safe_headers = dict(_fwd_headers) if isinstance(_fwd_headers, dict) else {}
+                    sensitive_headers = {
+                        "authorization",
+                        "cookie",
+                        "set-cookie",
+                        "x-api-key",
+                        "x-api-token",
+                        "x-auth-token",
+                    }
+                    for hk in list(safe_headers.keys()):
+                        if str(hk).lower() in sensitive_headers:
+                            safe_headers.pop(hk, None)
+                    server_ref.last_upstream = {
+                        "code": code,
+                        "body": resp_body.decode(errors="ignore") if isinstance(resp_body, (bytes, bytearray)) else str(resp_body),
+                        "url": _redact_url_userinfo(fwd_url),
+                        "headers": safe_headers,
+                        "method": method,
+                    }
+            except Exception:
+                pass
+            try:
+                _log("info", f"bypass timings total_ms={total_ms} queue_wait_ms={queue_wait_ms}")
+            except Exception:
+                pass
+            _log("info", f"bypass ok code={code} url={_redact_url_userinfo(fwd_url)}")
+            return {"status": code or 502, "body": resp_body or b"", "headers": resp_hdrs}
+        except BypassError as e:
+            _log("warning", f"bypass failed ({e}); falling back to arkeo")
+            if server_ref is not None and bypass_cooldown > 0 and str(e) != "cooldown_active":
+                server_ref.bypass_cooldown_until = time.time() + bypass_cooldown
 
     # Ensure client pubkey is available for contract selection/creation.
     client_pub = getattr(server_ref, "client_pubkey", "") if server_ref is not None else ""
@@ -6036,8 +6320,17 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
         pass
 
     height_start = time.time()
-    cur_height = _get_current_height(node)
+    cur_height, height_from_cache = _get_height_with_source(node)
     height_ms = int((time.time() - height_start) * 1000)
+
+    try:
+        height_skew = int(PROXY_HEIGHT_SKEW or 0) if height_from_cache else 0
+    except Exception:
+        height_skew = 0
+    try:
+        effective_height = cur_height + height_skew
+    except Exception:
+        effective_height = cur_height
 
     def _contract_is_usable(c: dict | None, provider_filter: str) -> bool:
         if not isinstance(c, dict):
@@ -6052,7 +6345,7 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
             return False
         if _safe_int(c.get("deposit")) <= 0:
             return False
-        if (_safe_int(c.get("height")) + _safe_int(c.get("duration"))) <= cur_height:
+        if (_safe_int(c.get("height")) + _safe_int(c.get("duration"))) <= effective_height:
             return False
         return True
 
@@ -6099,7 +6392,14 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
             contracts = _fetch_contracts(node, timeout=PROXY_CONTRACT_TIMEOUT, active_only=True, client_filter=client_pub)
             contract_fetch_ms = int((time.time() - t_fetch) * 1000)
             _log("info", f"contracts fetched count={len(contracts) if isinstance(contracts, list) else 0}")
-            active = _select_active_contract(contracts or [], client_pub, svc_id, cur_height, provider_filter=provider_filter)
+            active = _select_active_contract(
+                contracts or [],
+                client_pub,
+                svc_id,
+                cur_height,
+                provider_filter=provider_filter,
+                height_skew=height_skew,
+            )
             if active:
                 _log(
                     "info",
@@ -6424,6 +6724,12 @@ def _handle_forward_lane(work: WorkItem, cfg: dict) -> dict:
                 )
             sentinel_forward_ms = int((time.time() - fwd_start) * 1000)
 
+        try:
+            if _is_proxy_upstream_error(code, resp_body) and server_ref is not None and PROXY_PROVIDER_COOLDOWN > 0:
+                server_ref.cooldowns[provider_filter] = time.time() + float(PROXY_PROVIDER_COOLDOWN)
+        except Exception:
+            pass
+
         total_ms = int((time.time() - t_start) * 1000)
         tracked_ms = (
             height_ms
@@ -6708,6 +7014,84 @@ def _fetch_contract_config(
         return False, None, str(e)
 
 
+class BypassError(Exception):
+    pass
+
+
+def _forward_to_bypass(
+    bypass_base: str,
+    request_path: str,
+    query_string: str | None,
+    body: bytes | None,
+    method: str = "POST",
+    timeout: float = PROXY_BYPASS_TIMEOUT,
+    headers: dict | None = None,
+    username: str | None = None,
+    password: str | None = None,
+) -> tuple[int, bytes, dict, str, dict]:
+    """Forward the request to a bypass target without Arkeo auth."""
+    method = (method or "POST").upper()
+    base = (bypass_base or "").strip().rstrip("/")
+    if not base:
+        raise BypassError("missing bypass url")
+    path = request_path or "/"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    url = f"{base}{path}"
+    qs = query_string or ""
+    if qs and qs.startswith("?"):
+        qs = qs[1:]
+    if qs:
+        url = f"{url}?{qs}"
+
+    final_headers: dict[str, str] = {}
+    skip_headers = {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "host",
+        "content-length",
+    }
+    if isinstance(headers, dict):
+        for hk, hv in headers.items():
+            if hv is None:
+                continue
+            name = str(hk)
+            lname = name.lower()
+            if lname in skip_headers:
+                continue
+            final_headers[name] = str(hv)
+    lower_names = {k.lower(): k for k in final_headers.keys()}
+    if "accept" not in lower_names:
+        final_headers["Accept"] = "application/json"
+    if "content-type" not in lower_names:
+        final_headers["Content-Type"] = "application/json"
+    if username or password:
+        for hk in list(final_headers.keys()):
+            if hk.lower() == "authorization":
+                final_headers.pop(hk, None)
+        token = base64.b64encode(f"{username or ''}:{password or ''}".encode("utf-8")).decode("ascii")
+        final_headers["Authorization"] = f"Basic {token}"
+
+    data_bytes = body if method != "GET" else None
+    req = urllib.request.Request(url, data=data_bytes, headers=final_headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read(), dict(r.getheaders()), url, final_headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers), url, final_headers
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+        raise BypassError(str(e))
+    except Exception as e:
+        raise BypassError(str(e))
+
+
 def _forward_to_sentinel(
     sentinel: str,
     service_path: str,
@@ -6751,6 +7135,43 @@ def _forward_to_sentinel(
             url,
             final_headers,
         )
+
+
+def _redact_url_userinfo(url: str) -> str:
+    """Remove userinfo and query strings from URLs before logging."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if not parsed.scheme or not parsed.netloc:
+            return url
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    except Exception:
+        return url
+    return url
+
+
+def _is_proxy_upstream_error(code: int | None, resp_body: bytes | str | None) -> bool:
+    """Return True if the response matches our proxy_upstream_error wrapper."""
+    try:
+        if int(code or 0) != 502:
+            return False
+    except Exception:
+        return False
+    if resp_body is None:
+        return False
+    try:
+        payload = resp_body
+        if isinstance(resp_body, (bytes, bytearray)):
+            payload = resp_body.decode("utf-8", errors="ignore")
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if isinstance(payload, dict) and payload.get("error") == "proxy_upstream_error":
+            return True
+    except Exception:
+        return False
+    return False
 
 
 _TXHASH_RE = re.compile(r'(?i)\btxhash\b[:\s"]+([0-9A-Fa-f]{64})')
@@ -6938,8 +7359,19 @@ def _wait_for_new_contract(cfg: dict, client_pub: str, svc_id: int, start_height
     provider_filter = cfg.get("create_provider_pubkey") or cfg.get("provider_pubkey")
     while time.time() < deadline:
         contracts = _fetch_contracts(node, active_only=True, client_filter=client_pub)
-        cur_h = _get_current_height(node)
-        c = _select_active_contract(contracts, client_pub, svc_id, cur_h, provider_filter=provider_filter)
+        cur_h, height_from_cache = _get_height_with_source(node)
+        try:
+            height_skew = int(PROXY_HEIGHT_SKEW or 0) if height_from_cache else 0
+        except Exception:
+            height_skew = 0
+        c = _select_active_contract(
+            contracts,
+            client_pub,
+            svc_id,
+            cur_h,
+            provider_filter=provider_filter,
+            height_skew=height_skew,
+        )
         if c and _safe_int(c.get("height")) >= start_height:
             return c
         time.sleep(_safe_int(cfg.get("create_backoff_sec", 2), 2))
@@ -7101,14 +7533,19 @@ class PaygProxyHandler(BaseHTTPRequestHandler):
                 "cors_allow_origin": allow_origin,
             }
             try:
-                payload["height"] = _get_current_height(node)
+                height_val, _from_cache = _get_height_with_source(node)
+                payload["height"] = height_val
             except Exception:
                 payload["height"] = None
 
             # If we don't already have an active_contract cached, try to select one
             if not payload.get("active_contract"):
                 try:
-                    cur_h = _get_current_height(node)
+                    cur_h, height_from_cache = _get_height_with_source(node)
+                    try:
+                        height_skew = int(PROXY_HEIGHT_SKEW or 0) if height_from_cache else 0
+                    except Exception:
+                        height_skew = 0
                     # ensure contract cache map
                     if not hasattr(self.server, "contract_cache"):
                         self.server.contract_cache = {}
@@ -7128,7 +7565,14 @@ class PaygProxyHandler(BaseHTTPRequestHandler):
                         active = cache_entry.get("contract")
                     if not active:
                         contracts = _fetch_contracts(node, timeout=PROXY_CONTRACT_TIMEOUT, active_only=True, client_filter=client_pub_local)
-                        active = _select_active_contract(contracts or [], client_pub_local, _safe_int(service_id, 0), cur_h, provider_filter=provider_filter)
+                        active = _select_active_contract(
+                            contracts or [],
+                            client_pub_local,
+                            _safe_int(service_id, 0),
+                            cur_h,
+                            provider_filter=provider_filter,
+                            height_skew=height_skew,
+                        )
                     if active and provider_filter:
                         try:
                             contract_cache[provider_filter] = {"contract": active, "cached_at": time.time()}
@@ -7312,6 +7756,8 @@ def _do_post_inner_core(self, method: str = "POST"):
         body=body,
         client_ip=client_ip,
         deadline=time.time() + float(lane_timeout),
+        raw_path=incoming_path,
+        raw_query=orig_query,
     )
     if not lane.submit(work):
         try:
@@ -8017,6 +8463,39 @@ def _sanitize_listener_payload(payload: dict, existing_ports: set[int], current_
     health_method = "GET" if health_method_raw == "GET" else "POST"
     health_payload = (payload.get("health_payload") or payload.get("healthPayload") or "").strip()
     health_header = (payload.get("health_header") or payload.get("healthHeader") or "").strip()
+    bypass_uri = None
+    if "bypass_uri" in payload or "bypassUri" in payload:
+        bypass_uri = (payload.get("bypass_uri") or payload.get("bypassUri") or "").strip()
+        if bypass_uri and not bypass_uri.lower().startswith(("http://", "https://")):
+            return None, "bypass_uri must start with http:// or https://"
+    bypass_username = None
+    if "bypass_username" in payload or "bypassUsername" in payload:
+        bypass_username = (payload.get("bypass_username") or payload.get("bypassUsername") or "").strip()
+    bypass_password = None
+    if "bypass_password" in payload or "bypassPassword" in payload:
+        bypass_password = (payload.get("bypass_password") or payload.get("bypassPassword") or "").strip()
+    bypass_timeout_sec = None
+    if "bypass_timeout_sec" in payload or "bypassTimeoutSec" in payload:
+        raw_timeout = payload.get("bypass_timeout_sec") or payload.get("bypassTimeoutSec") or ""
+        raw_timeout = str(raw_timeout).strip()
+        if raw_timeout:
+            try:
+                bypass_timeout_sec = float(raw_timeout)
+            except Exception:
+                return None, "bypass_timeout_sec must be a number"
+        else:
+            bypass_timeout_sec = ""
+    bypass_cooldown_sec = None
+    if "bypass_cooldown_sec" in payload or "bypassCooldownSec" in payload:
+        raw_cooldown = payload.get("bypass_cooldown_sec") or payload.get("bypassCooldownSec") or ""
+        raw_cooldown = str(raw_cooldown).strip()
+        if raw_cooldown:
+            try:
+                bypass_cooldown_sec = float(raw_cooldown)
+            except Exception:
+                return None, "bypass_cooldown_sec must be a number"
+        else:
+            bypass_cooldown_sec = ""
     port_val = payload.get("port")
     port: int | None = None
     if port_val not in (None, ""):
@@ -8039,6 +8518,11 @@ def _sanitize_listener_payload(payload: dict, existing_ports: set[int], current_
         "location": location,
         "whitelist_ips": whitelist_ips,
         "cors_allowed_origins": cors_allowed_origins,
+        "bypass_uri": bypass_uri,
+        "bypass_username": bypass_username,
+        "bypass_password": bypass_password,
+        "bypass_timeout_sec": bypass_timeout_sec,
+        "bypass_cooldown_sec": bypass_cooldown_sec,
         "health_method": health_method,
         "health_payload": health_payload,
         "health_header": health_header,
@@ -8103,6 +8587,11 @@ def create_listener():
         "top_services": best,
         "whitelist_ips": clean.get("whitelist_ips") or "",
         "cors_allowed_origins": clean.get("cors_allowed_origins") if clean.get("cors_allowed_origins") is not None else CORS_ALLOWED_ORIGINS,
+        "bypass_uri": clean.get("bypass_uri") or "",
+        "bypass_username": clean.get("bypass_username") or "",
+        "bypass_password": clean.get("bypass_password") or "",
+        "bypass_timeout_sec": clean.get("bypass_timeout_sec") if clean.get("bypass_timeout_sec") is not None else "",
+        "bypass_cooldown_sec": clean.get("bypass_cooldown_sec") if clean.get("bypass_cooldown_sec") is not None else "",
         "health_method": clean.get("health_method") or "POST",
         "health_payload": clean.get("health_payload") or "",
         "health_header": clean.get("health_header") or "",
@@ -8191,6 +8680,16 @@ def update_listener(listener_id: str):
         l["whitelist_ips"] = clean.get("whitelist_ips") if clean.get("whitelist_ips") is not None else l.get("whitelist_ips", "")
         if clean.get("cors_allowed_origins") is not None:
             l["cors_allowed_origins"] = clean.get("cors_allowed_origins")
+        if clean.get("bypass_uri") is not None:
+            l["bypass_uri"] = clean.get("bypass_uri")
+        if clean.get("bypass_username") is not None:
+            l["bypass_username"] = clean.get("bypass_username")
+        if clean.get("bypass_password") is not None:
+            l["bypass_password"] = clean.get("bypass_password")
+        if clean.get("bypass_timeout_sec") is not None:
+            l["bypass_timeout_sec"] = clean.get("bypass_timeout_sec")
+        if clean.get("bypass_cooldown_sec") is not None:
+            l["bypass_cooldown_sec"] = clean.get("bypass_cooldown_sec")
         l["health_method"] = clean.get("health_method") or l.get("health_method") or "POST"
         l["health_payload"] = clean.get("health_payload") if clean.get("health_payload") is not None else l.get("health_payload", "")
         l["health_header"] = clean.get("health_header") if clean.get("health_header") is not None else l.get("health_header", "")
@@ -8241,9 +8740,21 @@ def update_listener(listener_id: str):
                 if str(l.get("service_id")) != str(clean.get("service_id") or "") or not new_top:
                     new_top = best
             l["top_services"] = _normalize_top_services(new_top)
+            if clean.get("location") is not None:
+                l["location"] = clean.get("location") or ""
             l["whitelist_ips"] = clean.get("whitelist_ips") if clean.get("whitelist_ips") is not None else l.get("whitelist_ips", "")
             if clean.get("cors_allowed_origins") is not None:
                 l["cors_allowed_origins"] = clean.get("cors_allowed_origins")
+            if clean.get("bypass_uri") is not None:
+                l["bypass_uri"] = clean.get("bypass_uri")
+            if clean.get("bypass_username") is not None:
+                l["bypass_username"] = clean.get("bypass_username")
+            if clean.get("bypass_password") is not None:
+                l["bypass_password"] = clean.get("bypass_password")
+            if clean.get("bypass_timeout_sec") is not None:
+                l["bypass_timeout_sec"] = clean.get("bypass_timeout_sec")
+            if clean.get("bypass_cooldown_sec") is not None:
+                l["bypass_cooldown_sec"] = clean.get("bypass_cooldown_sec")
             l["health_method"] = clean.get("health_method") or l.get("health_method") or "POST"
             l["health_payload"] = clean.get("health_payload") if clean.get("health_payload") is not None else l.get("health_payload", "")
             l["health_header"] = clean.get("health_header") if clean.get("health_header") is not None else l.get("health_header", "")
@@ -8485,6 +8996,7 @@ def test_listener(listener_id: str):
         used_provider = None
         used_contract_id = None
         used_nonce = None
+        bypass_used = False
         if isinstance(resp_headers, dict):
             def _hdr(name: str) -> str | None:
                 v = resp_headers.get(name)
@@ -8500,6 +9012,9 @@ def test_listener(listener_id: str):
             used_provider = _hdr("X-Arkeo-Provider")
             used_contract_id = _hdr("X-Arkeo-Contract-Id")
             used_nonce = _hdr("X-Arkeo-Nonce")
+            bypass_hdr = _hdr("X-Arkeo-Bypass-Used")
+            if bypass_hdr is not None and str(bypass_hdr).strip().lower() not in ("", "0", "false", "no", "off", "null"):
+                bypass_used = True
         timings_from_header = None
         if isinstance(resp_headers, dict):
             th = resp_headers.get("X-Arkeo-Timings") or resp_headers.get("x-arkeo-timings")
@@ -8561,6 +9076,7 @@ def test_listener(listener_id: str):
             "used_provider_pubkey": used_provider,
             "used_contract_id": used_contract_id,
             "used_nonce": used_nonce,
+            "bypass_used": bypass_used,
             "provider_pubkey": provider_pk,
             "provider_moniker": provider_moniker,
             "sentinel_url": sentinel_norm,

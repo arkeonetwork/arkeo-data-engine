@@ -230,7 +230,7 @@
 </div>
 
 <div class="card">
-    <h2>Arkeo Data Marketplace</h2>
+    <h2>Arkeo Dashboard</h2>
     <div class="metrics-grid header-metrics">
         <div class="metric-card">
             <div class="metric-label">Active Providers</div>
@@ -485,7 +485,7 @@
 <div id="adminPasswordGate" class="overlay overlay-strong hidden">
     <div class="overlay-card password-card">
         <div class="password-title">
-            <span>Arkeo Data Marketplace</span>
+            <span>Arkeo Dashboard</span>
             <span class="sep">|</span>
             <span class="sub highlight">Subscriber Manager</span>
         </div>
@@ -2616,6 +2616,27 @@
             const topServices = dedupTopServices(Array.isArray(l.top_services) ? l.top_services : []);
             const whitelist = l.whitelist_ips ? escapeHtml(l.whitelist_ips) : "0.0.0.0 (all)";
             const corsOrigins = l.cors_allowed_origins ? escapeHtml(l.cors_allowed_origins) : "*";
+            const bypassUri = (l.bypass_uri || "").toString();
+            const bypassUsername = (l.bypass_username || "").toString();
+            const bypassPasswordSet = Boolean(l.bypass_password_set);
+            const bypassTimeoutSec = l.bypass_timeout_sec !== undefined && l.bypass_timeout_sec !== null ? String(l.bypass_timeout_sec) : "";
+            const bypassTimeoutDefault = "3";
+            const bypassTimeoutValue = bypassTimeoutSec || bypassTimeoutDefault;
+            const bypassActive = Boolean(bypassUri);
+            const bypassCooldownUntil = Number(l.bypass_cooldown_until || 0);
+            const bypassCooling = bypassCooldownUntil && (Date.now() / 1000) < bypassCooldownUntil;
+            const bypassStatusDot = `<span class="status-dot ${bypassActive && !bypassCooling ? "dot-ok" : "dot-err"}"></span>`;
+            let bypassRtDisplay = "—";
+            if (l.bypass_last_ms !== undefined && l.bypass_last_ms !== null) {
+                const rtMs = Number(l.bypass_last_ms);
+                if (Number.isFinite(rtMs)) {
+                    bypassRtDisplay = `${Math.round(rtMs)} ms`;
+                }
+            }
+            const bypassUriDisplay = bypassUri ? bypassUri : "-";
+            const bypassUsernameDisplay = bypassUsername ? bypassUsername : "-";
+            const bypassPasswordDisplay = bypassPasswordSet ? "******" : "-";
+            const bypassTimeoutDisplay = bypassTimeoutValue ? `${bypassTimeoutValue}s` : "-";
             const hostForListener = window.location.hostname || "localhost";
             const protoForListener = (window.location.protocol || "").startsWith("https") ? "https" : "http";
             const endpointUrl = portSafe ? `${protoForListener}://${hostForListener}:${portSafe}` : "–";
@@ -2799,7 +2820,38 @@
                 </tr>
                 <tr class="listener-sub">
                     <td colspan="6">
-                        <div class="muted small">Top services:</div>
+                        <div class="muted small" style="margin-top:8px;">Direct Node:</div>
+                        <div class="muted small" style="display:grid; grid-template-columns: 1.6fr 1fr 1fr 0.7fr 0.6fr 0.9fr; gap:8px; align-items:start;">
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div class="muted small">Direct URI:</div>
+                                <input type="text" id="editBypassUri-${l.id}" class="full-input" placeholder="https://direct.example.com" value="${escapeHtml(bypassUri)}">
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div class="muted small">Direct Username:</div>
+                                <input type="text" id="editBypassUsername-${l.id}" class="full-input" placeholder="direct-user" value="${escapeHtml(bypassUsername)}">
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div class="muted small">Direct Password:</div>
+                                <input type="password" id="editBypassPassword-${l.id}" class="full-input" placeholder="${bypassPasswordSet ? "stored (leave blank to keep)" : "direct-pass"}" value="">
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div class="muted small">Direct Timeout:</div>
+                                <input type="number" id="editBypassTimeout-${l.id}" class="full-input" step="0.1" min="0" placeholder="${bypassTimeoutDefault}" value="${escapeHtml(bypassTimeoutValue)}">
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div class="muted small">Status:</div>
+                                <div class="muted small">${bypassStatusDot}</div>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div class="muted small">Response Time:</div>
+                                <div class="muted small"><span class="mono" style="color:#fff;"><strong>${escapeHtml(bypassRtDisplay)}</strong></span></div>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                <tr class="listener-sub">
+                    <td colspan="6">
+                        <div class="muted small">Top Services:</div>
                         <div class="muted">${topServicesDisplay}</div>
                     </td>
                 </tr>
@@ -2819,7 +2871,6 @@
                 <td class="listener-actions-cell col-actions">
                     <button class="btn-ghost" onclick="event.stopPropagation(); pollListener('${l.id}')">Poll</button>
                     <button class="btn-ghost" onclick="event.stopPropagation(); testListener('${l.id}')">Test</button>
-                    <button class="btn-ghost" onclick="event.stopPropagation(); statusListener('${l.id}')">Status</button>
                     <button class="primary" onclick="event.stopPropagation(); editListener('${l.id}')">Edit</button>
                     <button class="primary danger-btn" onclick="event.stopPropagation(); deleteListener('${l.id}')">Delete</button>
                 </td>
@@ -2855,7 +2906,38 @@
             </tr>
             <tr class="listener-sub">
                 <td colspan="6">
-                    <div class="muted small">Top services:</div>
+                    <div class="muted small" style="margin-top:8px;">Direct Node:</div>
+                    <div class="muted small" style="display:grid; grid-template-columns: 1.6fr 1fr 1fr 0.7fr 0.6fr 0.9fr; gap:8px; align-items:start;">
+                        <div style="display:flex; flex-direction:column; gap:4px;">
+                            <div class="muted small">Direct URI:</div>
+                            <div class="muted small"><span class="mono" style="color:#fff;"><strong>${escapeHtml(bypassUriDisplay)}</strong></span></div>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:4px;">
+                            <div class="muted small">Direct Username:</div>
+                            <div class="muted small"><span class="mono" style="color:#fff;"><strong>${escapeHtml(bypassUsernameDisplay)}</strong></span></div>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:4px;">
+                            <div class="muted small">Direct Password:</div>
+                            <div class="muted small"><span class="mono" style="color:#fff;"><strong>${escapeHtml(bypassPasswordDisplay)}</strong></span></div>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:4px;">
+                            <div class="muted small">Direct Timeout:</div>
+                            <div class="muted small"><span class="mono" style="color:#fff;"><strong>${escapeHtml(bypassTimeoutDisplay)}</strong></span></div>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:4px;">
+                            <div class="muted small">Status:</div>
+                            <div class="muted small">${bypassStatusDot}</div>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:4px;">
+                            <div class="muted small">Response Time:</div>
+                            <div class="muted small"><span class="mono" style="color:#fff;"><strong>${escapeHtml(bypassRtDisplay)}</strong></span></div>
+                        </div>
+                    </div>
+                </td>
+            </tr>
+            <tr class="listener-sub">
+                <td colspan="6">
+                    <div class="muted small">Top Services:</div>
                     <div class="muted">${topServicesDisplay}</div>
                 </td>
             </tr>
@@ -2969,15 +3051,31 @@
         const status = document.getElementById(`editStatus-${id}`)?.value || "";
         const whitelist = document.getElementById(`editWhitelist-${id}`)?.value || "";
         const corsOrigins = document.getElementById(`editCorsOrigins-${id}`)?.value || "";
+        const bypassUri = document.getElementById(`editBypassUri-${id}`)?.value || "";
+        const bypassUsername = document.getElementById(`editBypassUsername-${id}`)?.value || "";
+        const bypassPassword = document.getElementById(`editBypassPassword-${id}`)?.value || "";
+        const bypassTimeoutSec = document.getElementById(`editBypassTimeout-${id}`)?.value || "";
         const current = listenersCache.find((l) => String(l.id) === String(id));
+        const bypassPasswordSet = Boolean(current?.bypass_password_set);
         const body = {
             status,
             whitelist_ips: whitelist,
             cors_allowed_origins: corsOrigins,
+            bypass_uri: bypassUri,
+            bypass_username: bypassUsername,
+            bypass_timeout_sec: bypassTimeoutSec,
             health_method: document.getElementById(`editHealthMethod-${id}`)?.value || "",
             health_payload: document.getElementById(`editHealthPayload-${id}`)?.value || "",
             health_header: document.getElementById(`editHealthHeader-${id}`)?.value || "",
         };
+        if (!bypassUri) {
+            body.bypass_username = "";
+            body.bypass_password = "";
+        } else if (bypassPassword) {
+            body.bypass_password = bypassPassword;
+        } else if (!bypassPasswordSet) {
+            body.bypass_password = "";
+        }
         if (svcId) {
             body.service_id = svcId;
         } else if (current && current.service_id) {
@@ -3228,6 +3326,7 @@
                     providerMon: data && data.provider_moniker,
                     serviceId: data && data.service_id,
                     serviceName: data && data.service_name,
+                    bypassUsed: data && data.bypass_used,
                     sentinelTarget: data && data.sentinel_target,
                     candidateSentinel: data && data.candidate_sentinel,
                     candidateProvider: data && data.candidate_provider,
@@ -3279,6 +3378,9 @@
             const providerDisplay = last.provider || last.candidateProvider || last.lastCandProvider;
             const providerMonDisplay = last.providerMon;
             if (providerDisplay) metaLines.push(`Provider: ${providerDisplay}${providerMonDisplay ? ` (${providerMonDisplay})` : ""}`);
+            if (last.bypassUsed !== undefined && last.bypassUsed !== null) {
+                metaLines.push(`Direct Used: ${last.bypassUsed ? "Yes" : "No"}`);
+            }
             if (last.health_method) metaLines.push(`Method: ${last.health_method}`);
             if (last.health_header) metaLines.push(`Content-Type: ${last.health_header}`);
             if (last.health_payload) metaLines.push(`Payload/URL: ${last.health_payload}`);
@@ -3594,9 +3696,13 @@
                         const contractMsText = Number.isFinite(totalMs) ? `${Math.round(totalMs)} ms` : "—";
                         const contractOk = ok && Boolean(data?.arkeo_contract_id || data?.active_contract_id);
                         if (!contractOk) allOk = false;
+                        const bypassUsed = Boolean(data?.bypass_used);
 
                         appendPollLog(`  Test ${i + 1}/${runs}:`);
                         appendPollLog(`    - Contract: ${contractOk ? "OK" : "Failed"} (${contractMsText})`);
+                        if (bypassUsed) {
+                            appendPollLog("    - Direct: Used");
+                        }
                         if (providerMismatch) {
                             appendPollLog(`    - Provider: Failed (expected ${expectedProvider} got ${usedProvider})`);
                         }
