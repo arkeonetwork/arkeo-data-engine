@@ -420,6 +420,12 @@ def cache_counts():
     contracts_list = contracts.get("data", {}).get("contracts") or contracts.get("data", {}).get("contract") or []
     if isinstance(contracts_list, list):
         counts["contracts"] = len(contracts_list)
+        total_paid, total_tx = _contracts_all_time_totals(contracts_list)
+        counts["total_paid_uarkeo"] = total_paid
+        counts["total_transactions"] = total_tx
+    else:
+        counts["total_paid_uarkeo"] = 0
+        counts["total_transactions"] = 0
 
     services_list = []
     data_st = service_types.get("data")
@@ -522,6 +528,28 @@ def _parse_contract_height(contract: dict) -> int | None:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _contracts_all_time_totals(contracts_list: list) -> tuple[int, int]:
+    total_paid = 0
+    total_tx = 0
+    for c in contracts_list:
+        if not isinstance(c, dict):
+            continue
+        try:
+            if int(c.get("nonce") or 0) == 0:
+                continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            total_paid += int(c.get("paid") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            total_tx += int(c.get("nonce") or 1)
+        except (TypeError, ValueError):
+            total_tx += 1
+    return total_paid, total_tx
 
 
 def _contract_provider_pubkey(contract: dict) -> str | None:
