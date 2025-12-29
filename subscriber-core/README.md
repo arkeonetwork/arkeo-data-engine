@@ -7,25 +7,19 @@ Containerized admin UI + API that runs a subscriber hot wallet, builds a local c
 ## Install Docker on you host
 Before you start, install Docker on your host and be comfortable with basic Docker commands (start/stop, logs, pull). Use your OS vendor’s Docker docs.
 
-## Create a `subscriber.env` for the docker
-Save this file next to where you run Docker (e.g., `~/subscriber-core/subscriber.env` so the volume mount works):
+## Configure subscriber settings
+Settings are persisted in `~/subscriber-core/config/subscriber-settings.json` (mounted to `/app/config/subscriber-settings.json`). You can edit them in the Admin UI (Settings) or preseed the file before first run:
 ```
-SUBSCRIBER_NAME=Arkeo Core Subscriber
-
-KEY_NAME=subscriber
-KEY_KEYRING_BACKEND=test
-KEY_MNEMONIC=
-CHAIN_ID="arkeo-main-v1"
-
-ARKEOD_HOME=~/.arkeo
-EXTERNAL_ARKEOD_NODE=tcp://provider1.innovationtheory.com:26657
-EXTERNAL_ARKEO_REST_API=http://provider1.innovationtheory.com:1317
-EXTERNAL_SENTINEL_NODE=http://docker.innovationtheory.com:3636
-
-ADMIN_PORT=8079
-ADMIN_API_PORT=9998
+{
+  "SUBSCRIBER_NAME": "Arkeo Core Subscriber",
+  "KEY_NAME": "subscriber",
+  "KEY_KEYRING_BACKEND": "test",
+  "KEY_MNEMONIC": "",
+  "CHAIN_ID": "arkeo-main-v1",
+  "ARKEOD_NODE": "tcp://provider1.innovationtheory.com:26657"
+}
 ```
-If you don’t have a mnemonic, leave `KEY_MNEMONIC` empty. On first start the container will print a generated mnemonic—copy it from the logs and paste it back into `subscriber.env` for next runs.
+If you don’t have a mnemonic, leave `KEY_MNEMONIC` empty. On first start the container will generate one and persist it to `subscriber-settings.json` (also visible in the Admin UI).
 
 ## Run the Subscriber Core docker image
 ```bash
@@ -41,7 +35,6 @@ docker pull ghcr.io/arkeonetwork/subscriber-core:latest
 
 # run
 docker run -d --name subscriber-core --restart=unless-stopped \
-  --env-file ~/subscriber-core/subscriber.env \
   -e ENV_ADMIN_PORT=8079 \
   -p 8079:8079 -p 9998:9998 -p 62001-62100:62001-62100 \
   -v ~/subscriber-core/config:/app/config \

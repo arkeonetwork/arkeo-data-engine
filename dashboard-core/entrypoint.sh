@@ -6,6 +6,7 @@ echo "Dashboard-core (cache sync + web UI only)"
 ARKEOD_HOME=${ARKEOD_HOME:-/root/.arkeo}
 ARKEOD_HOME=${ARKEOD_HOME/#\~/$HOME}
 ARKEOD_NODE=${ARKEOD_NODE:-tcp://127.0.0.1:26657}
+CHAIN_ID=${CHAIN_ID:-arkeo-main-v1}
 ADMIN_PORT=${ADMIN_PORT:-${ENV_ADMIN_PORT:-8077}}
 ADMIN_API_PORT=${ADMIN_API_PORT:-${ENV_ADMIN_API_PORT:-9996}}
 HTTP_PORT=${HTTP_PORT:-80}
@@ -26,6 +27,7 @@ BLOCK_TIME_SECONDS=${BLOCK_TIME_SECONDS:-5.79954919}
 echo "Using:"
 echo "  ARKEOD_HOME          = $ARKEOD_HOME"
 echo "  ARKEOD_NODE          = $ARKEOD_NODE"
+echo "  CHAIN_ID             = $CHAIN_ID"
 echo "  ADMIN_PORT           = $ADMIN_PORT"
 echo "  ADMIN_API_PORT       = $ADMIN_API_PORT"
 echo "  HTTP_PORT            = $HTTP_PORT"
@@ -47,6 +49,11 @@ echo "  BLOCK_TIME_SECONDS   = ${BLOCK_TIME_SECONDS}"
 mkdir -p "$ARKEOD_HOME"
 if [ "$ARKEOD_HOME" != "$HOME/.arkeo" ]; then
   ln -sfn "$ARKEOD_HOME" "$HOME/.arkeo"
+fi
+
+if command -v arkeod >/dev/null 2>&1; then
+  arkeod config chain-id "$CHAIN_ID" --home "$ARKEOD_HOME" >/dev/null 2>&1 || true
+  arkeod config node "$ARKEOD_NODE" --home "$ARKEOD_HOME" >/dev/null 2>&1 || true
 fi
 
 mkdir -p /app/config
@@ -185,6 +192,7 @@ fi
 
 export ENV_ADMIN_PORT="$ADMIN_PORT"
 export ENV_ADMIN_API_PORT="$ADMIN_API_PORT"
+export CHAIN_ID
 
 echo "Starting supervisord..."
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf

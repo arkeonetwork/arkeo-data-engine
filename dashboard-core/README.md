@@ -6,6 +6,7 @@ Cache-only admin UI + API that reuses the subscriber-core sync pipeline (arkeod 
 ```bash
 # build
 docker build -t arkeonetwork/dashboard-core:dev .
+# (defaults to latest arkeo master; override with --build-arg ARKEO_REF=...)
 
 # run (UI defaults to 8077 in the container, API to 9996; nginx proxies HTTP/HTTPS to the UI and API)
 mkdir -p ~/dashboard-core/config ~/dashboard-core/cache ~/dashboard-core/arkeo
@@ -23,6 +24,7 @@ Environment hints for `dashboard.env`:
 # Which node and REST API to use for cache fetches
 ARKEOD_NODE=tcp://127.0.0.1:26657
 # (fallback) EXTERNAL_ARKEOD_NODE=tcp://...
+CHAIN_ID=arkeo-main-v1
 
 # Optional port overrides inside the container
 ENV_ADMIN_PORT=8077

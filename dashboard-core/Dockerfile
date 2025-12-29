@@ -5,9 +5,11 @@ RUN apt-get update && apt-get install -y git make build-essential curl jq && rm 
 
 WORKDIR /src
 
-# Clone Arkeo source (pin to main by default)
+# Clone Arkeo source (pin to master by default)
 ARG ARKEO_REF=master
-RUN git clone --branch ${ARKEO_REF} --single-branch https://github.com/arkeonetwork/arkeo.git
+# Cache-bust when upstream moves so "latest" stays up to date for the selected ref.
+ADD https://api.github.com/repos/arkeonetwork/arkeo/commits/${ARKEO_REF} /tmp/arkeo_ref.json
+RUN git clone --branch ${ARKEO_REF} --single-branch --depth 1 https://github.com/arkeonetwork/arkeo.git
 
 WORKDIR /src/arkeo
 

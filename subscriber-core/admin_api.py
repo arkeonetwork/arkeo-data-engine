@@ -2257,7 +2257,8 @@ DEFAULT_SLIPPAGE_BPS = int(os.getenv("DEFAULT_SLIPPAGE_BPS") or "100")
 OSMO_TO_ARKEO_CHANNEL = "channel-103074"  # Osmosis -> Arkeo
 ARKEO_TO_OSMO_CHANNEL = "channel-1"      # Arkeo -> Osmosis
 ARRIVAL_TOLERANCE_BPS = int(os.getenv("ARRIVAL_TOLERANCE_BPS") or "100")  # allow slight shortfall when checking arrival
-CHAIN_ID = _strip_quotes(os.getenv("CHAIN_ID") or os.getenv("ARKEOD_CHAIN_ID") or "")
+DEFAULT_CHAIN_ID = "arkeo-main-v1"
+CHAIN_ID = _strip_quotes(os.getenv("CHAIN_ID") or os.getenv("ARKEOD_CHAIN_ID") or DEFAULT_CHAIN_ID)
 NODE_ARGS = ["--node", ARKEOD_NODE] if ARKEOD_NODE else []
 CHAIN_ARGS = ["--chain-id", CHAIN_ID] if CHAIN_ID else []
 # Use the packaged supervisord config unless overridden
@@ -2271,7 +2272,6 @@ FEES_DEFAULT = os.getenv("TX_FEES") or "200uarkeo"
 API_PORT = int(os.getenv("ADMIN_API_PORT", "9998"))
 SENTINEL_CONFIG_PATH = os.getenv("SENTINEL_CONFIG_PATH", "/app/config/sentinel.yaml")
 SENTINEL_ENV_PATH = os.getenv("SENTINEL_ENV_PATH", "/app/config/sentinel.env")
-SUBSCRIBER_ENV_PATH = os.getenv("SUBSCRIBER_ENV_PATH", "/app/config/subscriber.env")
 SUBSCRIBER_SETTINGS_PATH = os.getenv("SUBSCRIBER_SETTINGS_PATH") or os.path.join(
     CONFIG_DIR or "/app/config", "subscriber-settings.json"
 )
@@ -2529,7 +2529,7 @@ def _default_subscriber_settings() -> dict:
         "KEY_NAME": os.getenv("KEY_NAME", KEY_NAME),
         "KEY_KEYRING_BACKEND": os.getenv("KEY_KEYRING_BACKEND", KEYRING),
         "KEY_MNEMONIC": os.getenv("KEY_MNEMONIC", KEY_MNEMONIC),
-        "CHAIN_ID": _strip_quotes(os.getenv("CHAIN_ID") or os.getenv("ARKEOD_CHAIN_ID") or ""),
+        "CHAIN_ID": _strip_quotes(os.getenv("CHAIN_ID") or os.getenv("ARKEOD_CHAIN_ID") or DEFAULT_CHAIN_ID),
         "ARKEOD_HOME": _expand_tilde(os.getenv("ARKEOD_HOME") or ARKEOD_HOME),
         "ARKEOD_NODE": _strip_quotes(
             os.getenv("ARKEOD_NODE") or os.getenv("EXTERNAL_ARKEOD_NODE") or ARKEOD_NODE
@@ -3809,7 +3809,7 @@ def wallets_info():
 
 @app.get("/api/subscriber-settings")
 def subscriber_settings_get():
-    """Return subscriber settings (replacement for subscriber.env) plus mnemonic if available."""
+    """Return subscriber settings plus mnemonic if available."""
     settings = _merge_subscriber_settings()
     _apply_subscriber_settings(settings)
     mnemonic, mnemonic_source = _read_hotwallet_mnemonic(settings)

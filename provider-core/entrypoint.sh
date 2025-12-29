@@ -24,6 +24,8 @@ echo "Provider-core Admin Mode (hot wallet + web UI only)"
 KEY_NAME=${KEY_NAME:-provider}
 RAW_KEY_MNEMONIC=${KEY_MNEMONIC:-}
 KEY_KEYRING_BACKEND=${KEY_KEYRING_BACKEND:-test}
+CHAIN_ID=${CHAIN_ID:-arkeo-main-v1}
+export CHAIN_ID
 
 ARKEOD_HOME=${ARKEOD_HOME:-~/.arkeo}
 # Expand leading tilde if provided via env (e.g. "~/.arkeo")
@@ -51,6 +53,7 @@ echo "Using:"
 echo "  KEY_NAME              = $KEY_NAME"
 echo "  KEY_KEYRING_BACKEND   = $KEY_KEYRING_BACKEND"
 echo "  KEY_MNEMONIC          = (hidden for security)"
+echo "  CHAIN_ID              = $CHAIN_ID"
 echo "  ARKEOD_HOME           = $ARKEOD_HOME"
 echo "  ARKEOD_NODE           = $ARKEOD_NODE"
 echo "  ADMIN_PORT            = $ADMIN_PORT"
@@ -163,7 +166,7 @@ DEFAULT_MONIKER="Default Provider"
 DEFAULT_WEBSITE="http://defaultprovider.com"
 DEFAULT_DESCRIPTION="Default provider description."
 DEFAULT_LOCATION="Default Location"
-DEFAULT_SOURCE_CHAIN=${SENTINEL_SOURCE_CHAIN:-"arkeo-main-v1"}
+DEFAULT_SOURCE_CHAIN=${SENTINEL_SOURCE_CHAIN:-$CHAIN_ID}
 DEFAULT_FREE_RATE_LIMIT=10
 DEFAULT_FREE_RATE_LIMIT_DURATION="1m"
 DEFAULT_CLAIM_STORE_LOCATION=${CLAIM_STORE_LOCATION:-"~/.arkeo/claims"}

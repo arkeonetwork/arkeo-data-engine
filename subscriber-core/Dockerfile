@@ -5,8 +5,8 @@ RUN apt-get update && apt-get install -y git make build-essential curl jq && rm 
 
 WORKDIR /src
 
-# Clone latest Arkeo source (public repo)
-RUN git clone --branch Upgrade-for-v1.0.16 --single-branch https://github.com/arkeonetwork/arkeo.git
+# Clone latest Arkeo source (public repo, default branch)
+RUN git clone --depth 1 --single-branch https://github.com/arkeonetwork/arkeo.git
 
 WORKDIR /src/arkeo
 

@@ -7,13 +7,15 @@ Containerized admin UI + API paired with the Arkeo sentinel service reverse-prox
 ## Install Docker on you host
 Before you start, install Docker on your host and be comfortable with basic Docker commands (start/stop, logs, pull). Use your OS vendor’s Docker docs.
 
-## Create the `provider.env` for the docker
-Create `~/provider.env` (or similar) with:
+## Configure the container (no provider.env required)
+You can pass env vars directly in `docker run` or configure everything in the Admin UI after startup. Settings persist to `/app/config/provider-settings.json` (mounted via the config volume).
+
+Common env vars (all optional; defaults are sane, and `CHAIN_ID` defaults to `arkeo-main-v1`):
 ```
 KEY_NAME=provider
 KEY_KEYRING_BACKEND=test
 KEY_MNEMONIC=
-CHAIN_ID="arkeo-main-v1"
+CHAIN_ID=arkeo-main-v1
 
 ARKEOD_HOME=~/.arkeo
 EXTERNAL_ARKEOD_NODE=tcp://provider1.innovationtheory.com:26657
@@ -26,7 +28,7 @@ SENTINEL_PORT=3636
 ADMIN_PORT=8080
 ADMIN_API_PORT=9999
 ```
-- If you don’t have a mnemonic, leave `KEY_MNEMONIC` empty. On first launch the container will create a hotwallet and print the mnemonic; copy it and paste it back into `provider.env`.
+- If you don’t have a mnemonic, leave `KEY_MNEMONIC` empty. On first launch the container will create a hotwallet and print the mnemonic in logs; save it and paste it into the Admin UI (Provider Settings -> Hotwallet Mnemonic) if you want it persisted.
 
 ## Run the latest Provider Core docker image
 ```bash
@@ -42,7 +44,6 @@ docker pull ghcr.io/arkeonetwork/provider-core:latest
 
 # run
 docker run -d --name provider-core --restart=unless-stopped \
-  --env-file ~/provider.env \
   -e ENV_ADMIN_PORT=8080 \
   -p 8080:8080 -p 3636:3636 -p 9999:9999 \
   -v ~/provider-core/config:/app/config \
@@ -58,7 +59,7 @@ docker run -d --name provider-core --restart=unless-stopped \
 - In Admin: configure sentinel (so your provider is discoverable).
 - Add provider services: pick the service type, set RPC URI and optional user/pass. If your node is firewalled, allow the Docker host IP. The host must reach your node.
 - Each provider service requires a minimum bond of 1 ARKEO to prevent spam.
-- Do a Provider Export when done. Keep `provider.env` and exports safe—they contain your mnemonic.
+- Do a Provider Export when done. Keep your mnemonic and exports safe - they contain secrets.
 
 You’re now on the Arkeo Data Marketplace.
 
