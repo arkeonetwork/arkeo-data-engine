@@ -48,13 +48,15 @@ DEFAULT_KEY_NAME = "provider"
 DEFAULT_KEYRING = "test"
 DEFAULT_CHAIN_ID = "arkeo-main-v1"
 DEFAULT_ARKEOD_HOME = "~/.arkeo"
-DEFAULT_ARKEOD_NODE = "tcp://127.0.0.1:26657"
-DEFAULT_ARKEO_REST = "http://127.0.0.1:1317"
+DEFAULT_ARKEOD_NODE = "https://rpc-seed.arkeo.network"
+DEFAULT_ARKEO_REST = "https://rest-seed.arkeo.network"
 DEFAULT_SENTINEL_NODE = "http://127.0.0.1"
 DEFAULT_SENTINEL_PORT = "3636"
 DEFAULT_ADMIN_PORT = "8080"
 DEFAULT_ADMIN_API_PORT = "9999"
 DEFAULT_MNEMONIC = ""
+DEFAULT_OSMOSIS_RPC = "https://rpc.osmosis.zone"
+KEY_OP_TIMEOUT_S = 20.0
 APP_VERSION = (os.getenv("APP_VERSION") or "").strip() or "dev"
 
 ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", DEFAULT_ARKEOD_HOME))
@@ -70,29 +72,32 @@ def _strip_quotes(val: str | None) -> str:
 
 
 def _ensure_tcp_scheme(url: str | None) -> str:
-    """Force RPC URLs to use tcp:// scheme; leave empty or already-tcp unchanged."""
+    """Ensure RPC URLs include a scheme; keep the provided scheme."""
     if not url:
         return ""
     s = str(url).strip()
-    lower = s.lower()
-    if lower.startswith("tcp://"):
+    if "://" in s:
         return s
-    if lower.startswith("http://"):
-        return "tcp://" + s[len("http://") :]
-    if lower.startswith("https://"):
-        return "tcp://" + s[len("https://") :]
-    return s
+    return "http://" + s
 
 
 def _ensure_http_rpc(url: str | None) -> str:
-    """Return an HTTP(S) RPC URL suitable for browser use; converts tcp:// to http://."""
+    """Return an HTTP(S) RPC URL suitable for browser use."""
     if not url:
         return ""
     s = _strip_quotes(str(url).strip())
-    lower = s.lower()
-    if lower.startswith("tcp://"):
-        return "http://" + s[len("tcp://") :]
-    return s
+    try:
+        parsed = urllib.parse.urlparse(s)
+    except Exception:
+        parsed = None
+    if parsed and parsed.scheme in ("http", "https"):
+        return s
+    hostport = ""
+    if parsed:
+        hostport = parsed.netloc or parsed.path
+    if not hostport:
+        return s if "://" in s else f"http://{s}"
+    return f"http://{hostport}"
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -208,24 +213,22 @@ def _normalize_base(url: str | None, default_port: str | None = None, default_sc
     if not url:
         return ""
     url = url.strip()
-    # Convert tcp:// to http:// for probing
-    if url.startswith("tcp://"):
-        url = "http://" + url[len("tcp://") :]
+    if "://" not in url:
+        url = f"{default_scheme}://{url}"
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:
         parsed = None
     if parsed:
         scheme = parsed.scheme or default_scheme
+        if scheme not in ("http", "https"):
+            scheme = default_scheme
         netloc = parsed.netloc or parsed.path or ""
         if default_port and ":" not in netloc:
             netloc = f"{netloc}:{default_port}"
         return f"{scheme}://{netloc}"
-    # Fallback simple join
     if default_port and ":" not in url:
         url = f"{url}:{default_port}"
-    if not url.startswith("http://") and not url.startswith("https://"):
-        url = f"{default_scheme}://{url}"
     return url
 
 
@@ -287,16 +290,27 @@ def run(cmd: str) -> tuple[int, str]:
         return e.returncode, e.output.decode("utf-8")
 
 
-def run_list(cmd: list[str]) -> tuple[int, str]:
+def run_list(cmd: list[str], timeout: float | None = None) -> tuple[int, str]:
     """Run a command without a shell and return (exit_code, output)."""
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-        return 0, out.decode("utf-8")
-    except subprocess.CalledProcessError as e:
-        return e.returncode, e.output.decode("utf-8")
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=timeout,
+        )
+        out = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
+        return proc.returncode, out
+    except subprocess.TimeoutExpired as e:
+        out = e.output.decode("utf-8", errors="replace") if e.output else ""
+        msg = f"timeout after {timeout}s"
+        return 124, f"{out}\n{msg}".strip()
+    except Exception as e:
+        return 1, str(e)
 
 
-def run_with_input(cmd: list[str], input_text: str) -> tuple[int, str]:
+def run_with_input(cmd: list[str], input_text: str, timeout: float | None = None) -> tuple[int, str]:
     """Run a command with stdin content."""
     try:
         proc = subprocess.run(
@@ -305,8 +319,13 @@ def run_with_input(cmd: list[str], input_text: str) -> tuple[int, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
+            timeout=timeout,
         )
-        return proc.returncode, proc.stdout.decode("utf-8")
+        return proc.returncode, proc.stdout.decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired as e:
+        out = e.output.decode("utf-8", errors="replace") if e.output else ""
+        msg = f"timeout after {timeout}s"
+        return 124, f"{out}\n{msg}".strip()
     except Exception as e:
         return 1, str(e)
 
@@ -2287,7 +2306,7 @@ def osmosis_balances():
 
 @app.get("/api/osmosis-rpc")
 def osmosis_rpc_get():
-    """Return HTTP(S) Osmosis RPC endpoint (tcp converted to http)."""
+    """Return HTTP(S) Osmosis RPC endpoint."""
     rpc = _ensure_http_rpc(OSMOSIS_RPC)
     return jsonify({"rpc": rpc})
 
@@ -3883,7 +3902,7 @@ def _default_provider_settings() -> dict:
         "SENTINEL_PORT": os.getenv("SENTINEL_PORT") or DEFAULT_SENTINEL_PORT,
         "ADMIN_PORT": os.getenv("ADMIN_PORT") or DEFAULT_ADMIN_PORT,
         "ADMIN_API_PORT": os.getenv("ADMIN_API_PORT") or DEFAULT_ADMIN_API_PORT,
-        "OSMOSIS_RPC": _strip_quotes(os.getenv("OSMOSIS_RPC") or ""),
+        "OSMOSIS_RPC": _strip_quotes(os.getenv("OSMOSIS_RPC") or DEFAULT_OSMOSIS_RPC),
         "OSMOSIS_USDC_DENOMS": OSMOSIS_USDC_DENOMS,
         "USDC_OSMO_DENOM": os.getenv("USDC_OSMO_DENOM", "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4"),
         "ARKEO_OSMO_DENOM": os.getenv("ARKEO_OSMO_DENOM", "ibc/AD969E97A63B64B30A6E4D9F598341A403B849F5ACFEAA9F18DBD9255305EC65"),
@@ -4051,7 +4070,7 @@ def _delete_hotwallet(key_name: str, keyring_backend: str, home: str) -> tuple[i
         "--force",
         "--yes",
     ]
-    return run_list(cmd)
+    return run_list(cmd, timeout=KEY_OP_TIMEOUT_S)
 
 
 def _import_hotwallet_from_mnemonic(
@@ -4069,7 +4088,7 @@ def _import_hotwallet_from_mnemonic(
         key_name,
         "--recover",
     ]
-    return run_with_input(cmd, mnemonic.strip() + "\n")
+    return run_with_input(cmd, mnemonic.strip() + "\n", timeout=KEY_OP_TIMEOUT_S)
 
 
 def _create_hotwallet(
@@ -4088,7 +4107,7 @@ def _create_hotwallet(
         "add",
         key_name,
     ]
-    code, out = run_list(cmd)
+    code, out = run_list(cmd, timeout=KEY_OP_TIMEOUT_S)
     mnemonic = _extract_mnemonic(out)
     return code, out, mnemonic
 
@@ -4585,47 +4604,33 @@ def provider_settings_get():
 @app.post("/api/provider-settings")
 def provider_settings_save():
     """Persist provider settings and optionally rotate hotwallet mnemonic."""
+    req_id = secrets.token_hex(4)
+    started_at = time.time()
     payload = request.get_json(force=True, silent=True) or {}
     incoming = payload.get("settings") if isinstance(payload, dict) else None
     data = incoming if isinstance(incoming, dict) else payload
     if not isinstance(data, dict):
         return jsonify({"error": "invalid payload"}), 400
 
+    app.logger.info(
+        "provider-settings-save start id=%s keys=%s mnemonic_provided=%s",
+        req_id,
+        sorted(list(data.keys())),
+        bool((data.get("KEY_MNEMONIC") or data.get("mnemonic") or "").strip()),
+    )
     merged = _merge_provider_settings(data)
-    target_mnemonic = (data.get("KEY_MNEMONIC") or data.get("mnemonic") or merged.get("KEY_MNEMONIC") or "").strip()
+    provided_mnemonic = (data.get("KEY_MNEMONIC") or data.get("mnemonic") or "").strip()
     current_mnemonic, mnemonic_source = _read_hotwallet_mnemonic(merged)
-    if not target_mnemonic and current_mnemonic:
-        target_mnemonic = current_mnemonic
-    rotate = bool(target_mnemonic)
+    target_mnemonic = (provided_mnemonic or current_mnemonic or "").strip()
+    mnemonic_changed = bool(provided_mnemonic) and provided_mnemonic != current_mnemonic
+    rotate = False
     delete_result: tuple[int, str] | None = None
     import_result: tuple[int, str] | None = None
     generated_result: tuple[int, str, str] | None = None
 
-    if rotate and target_mnemonic:
-        delete_result = _delete_hotwallet(
-            merged.get("KEY_NAME") or KEY_NAME,
-            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
-            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
-        )
-        delete_code, delete_out = delete_result
-        if delete_code not in (0, 1) and "not found" not in delete_out.lower():
-            _emit_provider_settings_failed("delete_hotwallet", delete_out)
-            return jsonify({"error": "failed to delete existing hotwallet", "detail": delete_out}), 500
-
-        import_result = _import_hotwallet_from_mnemonic(
-            target_mnemonic,
-            merged.get("KEY_NAME") or KEY_NAME,
-            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
-            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
-        )
-        import_code, import_out = import_result
-        if import_code != 0:
-            _emit_provider_settings_failed("import_mnemonic", import_out)
-            return jsonify({"error": "failed to import mnemonic", "detail": import_out}), 500
-        merged["KEY_MNEMONIC"] = target_mnemonic
-        mnemonic_source = "uploaded"
-    else:
+    if not target_mnemonic:
         # No mnemonic available; generate a new hotwallet
+        app.logger.info("provider-settings-save id=%s step=generate_mnemonic", req_id)
         delete_result = _delete_hotwallet(
             merged.get("KEY_NAME") or KEY_NAME,
             merged.get("KEY_KEYRING_BACKEND") or KEYRING,
@@ -4637,15 +4642,67 @@ def provider_settings_save():
             merged.get("ARKEOD_HOME") or ARKEOD_HOME,
         )
         generated_result = (gen_code, gen_out, gen_mnemonic)
+        app.logger.info(
+            "provider-settings-save id=%s step=generate_mnemonic_done delete_exit=%s gen_exit=%s out_len=%s",
+            req_id,
+            delete_result[0] if delete_result else None,
+            gen_code,
+            len(gen_out or ""),
+        )
         if gen_code != 0 or not gen_mnemonic:
             _emit_provider_settings_failed("generate_hotwallet", gen_out)
             return jsonify({"error": "failed to generate new mnemonic", "detail": gen_out}), 500
         merged["KEY_MNEMONIC"] = gen_mnemonic
         mnemonic_source = "generated"
         rotate = True
+    elif mnemonic_changed:
+        app.logger.info("provider-settings-save id=%s step=import_mnemonic", req_id)
+        delete_result = _delete_hotwallet(
+            merged.get("KEY_NAME") or KEY_NAME,
+            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
+            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
+        )
+        delete_code, delete_out = delete_result
+        app.logger.info(
+            "provider-settings-save id=%s step=import_mnemonic_delete exit=%s out_len=%s",
+            req_id,
+            delete_code,
+            len(delete_out or ""),
+        )
+        if delete_code not in (0, 1) and "not found" not in delete_out.lower():
+            _emit_provider_settings_failed("delete_hotwallet", delete_out)
+            return jsonify({"error": "failed to delete existing hotwallet", "detail": delete_out}), 500
+
+        import_result = _import_hotwallet_from_mnemonic(
+            target_mnemonic,
+            merged.get("KEY_NAME") or KEY_NAME,
+            merged.get("KEY_KEYRING_BACKEND") or KEYRING,
+            merged.get("ARKEOD_HOME") or ARKEOD_HOME,
+        )
+        import_code, import_out = import_result
+        app.logger.info(
+            "provider-settings-save id=%s step=import_mnemonic_done exit=%s out_len=%s",
+            req_id,
+            import_code,
+            len(import_out or ""),
+        )
+        if import_code != 0:
+            _emit_provider_settings_failed("import_mnemonic", import_out)
+            return jsonify({"error": "failed to import mnemonic", "detail": import_out}), 500
+        merged["KEY_MNEMONIC"] = target_mnemonic
+        mnemonic_source = "uploaded"
+        rotate = True
+    else:
+        if target_mnemonic:
+            merged["KEY_MNEMONIC"] = target_mnemonic
 
     _apply_provider_settings(merged)
     _write_provider_settings_file(merged)
+    app.logger.info(
+        "provider-settings-save id=%s step=write_settings elapsed_ms=%s",
+        req_id,
+        int((time.time() - started_at) * 1000),
+    )
     _emit_wallet_telemetry_if_needed()
     # Keep sentinel env in sync for PROVIDER_HUB_URI
     try:
@@ -4656,6 +4713,7 @@ def provider_settings_save():
         with open(SENTINEL_ENV_PATH, "w", encoding="utf-8") as f:
             for k, v in env_file.items():
                 f.write(f"{k}={shlex.quote(str(v))}\n")
+        app.logger.info("provider-settings-save id=%s step=sync_rest_env", req_id)
     except Exception:
         app.logger.warning("provider-settings-save: failed to sync PROVIDER_HUB_URI to sentinel env", exc_info=True)
 
@@ -4678,6 +4736,7 @@ def provider_settings_save():
         api_cfg["listen_addr"] = f"0.0.0.0:{sentinel_port}"
         with open(SENTINEL_CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f, sort_keys=False)
+        app.logger.info("provider-settings-save id=%s step=sync_sentinel_port", req_id)
     except Exception:
         app.logger.warning("provider-settings-save: failed to sync sentinel port", exc_info=True)
 
@@ -4685,6 +4744,13 @@ def provider_settings_save():
         merged.get("KEY_NAME") or KEY_NAME, merged.get("KEY_KEYRING_BACKEND") or KEYRING
     )
     sentinel_updated = _sync_sentinel_pubkey(bech32_pk) if bech32_pk else False
+    app.logger.info(
+        "provider-settings-save done id=%s rotate=%s sentinel_updated=%s elapsed_ms=%s",
+        req_id,
+        rotate,
+        sentinel_updated,
+        int((time.time() - started_at) * 1000),
+    )
 
     return jsonify(
         {
@@ -5030,8 +5096,8 @@ def update_sentinel_config():
         if not url:
             return ""
         url = url.strip()
-        if url.startswith("tcp://"):
-            url = "http://" + url[len("tcp://") :]
+        if "://" not in url:
+            url = "http://" + url
         try:
             parsed = urllib.parse.urlparse(url)
             hostport = parsed.netloc or parsed.path
@@ -5047,12 +5113,8 @@ def update_sentinel_config():
         if hostport:
             # EVENT_STREAM_HOST should be host:port (no scheme)
             hostport_no_scheme = hostport
-            if hostport_no_scheme.startswith("tcp://"):
-                hostport_no_scheme = hostport_no_scheme[len("tcp://") :]
-            if hostport_no_scheme.startswith("http://"):
-                hostport_no_scheme = hostport_no_scheme[len("http://") :]
-            if hostport_no_scheme.startswith("https://"):
-                hostport_no_scheme = hostport_no_scheme[len("https://") :]
+            if "://" in hostport_no_scheme:
+                hostport_no_scheme = hostport_no_scheme.split("://", 1)[1]
             _set_env("EVENT_STREAM_HOST", hostport_no_scheme)
     hub_env = settings_rest or os.getenv("PROVIDER_HUB_URI")
     if hub_env:

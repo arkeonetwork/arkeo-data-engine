@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 ARKEOD_HOME = os.path.expanduser(os.getenv("ARKEOD_HOME", "/root/.arkeo"))
 # These are dynamically refreshed from subscriber-settings.json before each fetch cycle
-ARKEOD_NODE = os.getenv("ARKEOD_NODE") or os.getenv("EXTERNAL_ARKEOD_NODE") or "tcp://provider1.innovationtheory.com:26657"
+ARKEOD_NODE = os.getenv("ARKEOD_NODE") or os.getenv("EXTERNAL_ARKEOD_NODE") or "https://rpc-seed.arkeo.network"
 CACHE_DIR = os.getenv("CACHE_DIR", "/app/cache")
 CONFIG_DIR = os.getenv("CONFIG_DIR", "/app/config")
 CACHE_FETCH_INTERVAL = 0  # populated below via env

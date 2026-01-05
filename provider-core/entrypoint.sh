@@ -85,13 +85,17 @@ export CHAIN_ID
 ARKEOD_HOME=${ARKEOD_HOME:-~/.arkeo}
 # Expand leading tilde if provided via env (e.g. "~/.arkeo")
 ARKEOD_HOME=${ARKEOD_HOME/#\~/$HOME}
-ARKEOD_NODE=${ARKEOD_NODE:-${EXTERNAL_ARKEOD_NODE:-tcp://127.0.0.1:26657}}
+ARKEOD_NODE=${ARKEOD_NODE:-${EXTERNAL_ARKEOD_NODE:-https://rpc-seed.arkeo.network}}
 RPC_URL_DEFAULT=${SENTINEL_RPC_URL:-$ARKEOD_NODE}
-# If rpc url is tcp:// convert to http:// for sentinel
-RPC_URL_DEFAULT=${RPC_URL_DEFAULT/tcp:\/\//http:\/\/}
+# Ensure sentinel RPC URL uses http(s)
+case "$RPC_URL_DEFAULT" in
+  http://*|https://*) ;;
+  *) RPC_URL_DEFAULT="http://${RPC_URL_DEFAULT#*://}" ;;
+esac
 ADMIN_PORT=${ADMIN_PORT:-8080}
 # PROVIDER_HUB_URI is the provider REST base
-PROVIDER_HUB_URI=${PROVIDER_HUB_URI:-}
+PROVIDER_HUB_URI=${PROVIDER_HUB_URI:-https://rest-seed.arkeo.network}
+OSMOSIS_RPC=${OSMOSIS_RPC:-https://rpc.osmosis.zone}
 ADMIN_API_PORT=${ADMIN_API_PORT:-9999}
 
 # Default sentinel-related envs (used by sentinel binary)
@@ -644,9 +648,8 @@ if chain_id:
 if arkeod_node:
     env_data["ARKEOD_NODE"] = arkeod_node
     hostport = arkeod_node
-    for prefix in ("tcp://", "http://", "https://"):
-        if hostport.startswith(prefix):
-            hostport = hostport[len(prefix) :]
+    if "://" in hostport:
+        hostport = hostport.split("://", 1)[1]
     env_data["EVENT_STREAM_HOST"] = hostport
 if provider_hub:
     env_data["PROVIDER_HUB_URI"] = provider_hub

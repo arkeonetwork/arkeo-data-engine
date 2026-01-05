@@ -111,9 +111,9 @@
         <tr>
             <td class="label">
                 Arkeo RPC
-                <div class="hint">RPC endpoint used for syncing and queries (tcp:// or http://).</div>
+                <div class="hint">RPC endpoint used for syncing and queries (http:// or https://).</div>
             </td>
-            <td class="value"><input type="text" id="arkeodNode" placeholder="tcp://127.0.0.1:26657" /></td>
+            <td class="value"><input type="text" id="arkeodNode" placeholder="https://rpc-seed.arkeo.network" /></td>
         </tr>
         <tr>
             <td class="label">
@@ -427,8 +427,8 @@
         KEY_KEYRING_BACKEND: "test",
         CHAIN_ID: "arkeo-main-v1",
         ARKEOD_HOME: "/root/.arkeo",
-        ARKEOD_NODE: "tcp://127.0.0.1:26657",
-        OSMOSIS_RPC: "",
+        ARKEOD_NODE: "https://rpc-seed.arkeo.network",
+        OSMOSIS_RPC: "https://rpc.osmosis.zone",
         KEY_MNEMONIC: "",
         ETH_ADDRESS: "",
         ADMIN_PORT: "8079",
@@ -503,12 +503,7 @@
         if (event && event.preventDefault) event.preventDefault();
         const normalizeRpc = (val) => {
             if (!val) return "";
-            const trimmed = String(val).trim();
-            const lower = trimmed.toLowerCase();
-            if (lower.startsWith("tcp://")) return trimmed;
-            if (lower.startsWith("http://")) return "tcp://" + trimmed.slice("http://".length);
-            if (lower.startsWith("https://")) return "tcp://" + trimmed.slice("https://".length);
-            return trimmed;
+            return String(val).trim();
         };
         const payload = {
             settings: {

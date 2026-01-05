@@ -2348,13 +2348,13 @@ KEY_MNEMONIC = os.getenv("KEY_MNEMONIC", "")
 ARKEOD_NODE = _strip_quotes(
     os.getenv("ARKEOD_NODE")
     or os.getenv("EXTERNAL_ARKEOD_NODE")
-    or "tcp://127.0.0.1:26657"
+    or "https://rpc-seed.arkeo.network"
 )
 # ETH flows disabled; keep defaults empty
 ETH_RPC = ""
 ETH_USDC_CONTRACT = ""
 ETH_USDC_DECIMALS = int(os.getenv("ETH_USDC_DECIMALS", "6"))
-OSMOSIS_RPC = _strip_quotes(os.getenv("OSMOSIS_RPC") or "")
+OSMOSIS_RPC = _strip_quotes(os.getenv("OSMOSIS_RPC") or "https://rpc.osmosis.zone")
 OSMOSIS_HOME = os.path.expanduser(os.getenv("OSMOSIS_HOME", "/app/config/osmosis"))
 OSMOSIS_KEY_NAME = os.getenv("OSMOSIS_KEY_NAME", "osmo-subscriber")
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
@@ -2618,17 +2618,13 @@ def _expand_tilde(val: str | None) -> str:
 
 
 def _ensure_tcp_scheme(url: str | None) -> str:
-    """Force RPC URLs to use tcp:// scheme; leave empty or already-tcp unchanged."""
+    """Normalize RPC URLs; preserve http/https/tcp schemes."""
     if not url:
         return ""
     s = str(url).strip()
     lower = s.lower()
     if lower.startswith("tcp://"):
         return s
-    if lower.startswith("http://"):
-        return "tcp://" + s[len("http://") :]
-    if lower.startswith("https://"):
-        return "tcp://" + s[len("https://") :]
     return s
 
 
@@ -2657,7 +2653,7 @@ def _default_subscriber_settings() -> dict:
         ),
         "ADMIN_PORT": os.getenv("ADMIN_PORT") or os.getenv("ENV_ADMIN_PORT") or "8079",
         "ADMIN_API_PORT": os.getenv("ADMIN_API_PORT") or str(API_PORT),
-        "OSMOSIS_RPC": _strip_quotes(os.getenv("OSMOSIS_RPC") or ""),
+        "OSMOSIS_RPC": _strip_quotes(os.getenv("OSMOSIS_RPC") or OSMOSIS_RPC),
         "OSMOSIS_USDC_DENOMS": OSMOSIS_USDC_DENOMS,
         "ETH_ADDRESS": "",
         "USDC_OSMO_DENOM": os.getenv("USDC_OSMO_DENOM", "ibc/498A0751C798A0D9A389AA3691123DADA57DAA4FE165D5C75894505B876BA6E4"),

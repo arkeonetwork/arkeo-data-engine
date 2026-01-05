@@ -98,19 +98,19 @@
             <td class="value"><div id="arkeodHomeValue" class="muted">(read-only)</div></td>
         </tr>
         <tr>
-            <td class="label">Arkeod Node (RPC)<div class="hint">RPC endpoint arkeod uses (tcp://host:port).</div></td>
-            <td class="value"><input type="text" id="arkeodNode" placeholder="tcp://127.0.0.1:26657" /></td>
+            <td class="label">Arkeod Node (RPC)<div class="hint">RPC endpoint arkeod uses (http(s)://host:port).</div></td>
+            <td class="value"><input type="text" id="arkeodNode" placeholder="https://rpc-seed.arkeo.network" /></td>
         </tr>
         <tr>
             <td class="label">
                 Osmosis RPC
                 <div class="hint">Remote Osmosis RPC endpoint used for hot wallet balance/block checks.</div>
             </td>
-            <td class="value"><input type="text" id="osmoRpc" placeholder="http://127.0.0.1:26660" /></td>
+            <td class="value"><input type="text" id="osmoRpc" placeholder="https://rpc.osmosis.zone" /></td>
         </tr>
         <tr>
             <td class="label">Arkeo REST API<div class="hint">REST endpoint for Arkeo queries (http://host:port).</div></td>
-            <td class="value"><input type="text" id="arkeodRest" placeholder="http://127.0.0.1" /></td>
+            <td class="value"><input type="text" id="arkeodRest" placeholder="https://rest-seed.arkeo.network" /></td>
         </tr>
         <tr>
             <td class="label">Sentinel Node<div class="hint">Base URL for the sentinel host (no port).</div></td>
@@ -559,14 +559,16 @@
 
     async function saveProviderSettings(event) {
         if (event && event.preventDefault) event.preventDefault();
+        const saveStarted = Date.now();
+        const markStage = (label) => {
+            console.info(`[save-settings] ${label} (+${Date.now() - saveStarted}ms)`);
+            setStatusMessage(`Saving settings... ${label}`, false);
+        };
         const normalizeRpc = (val) => {
             if (!val) return "";
             const trimmed = String(val).trim();
-            const lower = trimmed.toLowerCase();
-            if (lower.startsWith("tcp://")) return trimmed;
-            if (lower.startsWith("http://")) return "tcp://" + trimmed.slice("http://".length);
-            if (lower.startsWith("https://")) return "tcp://" + trimmed.slice("https://".length);
-            return trimmed;
+            if (trimmed.includes("://")) return trimmed;
+            return "http://" + trimmed;
         };
         const payload = {
             settings: {
@@ -591,6 +593,7 @@
         let isError = false;
         setStatusMessage(finalMessage, false);
         try {
+            markStage("posting");
             const res = await fetch(resolveApi("/api/provider-settings"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -601,6 +604,7 @@
                 throw new Error(data && data.error ? data.error : res.statusText);
             }
             providerSettingsCache = data.settings || providerSettingsCache;
+            markStage("updating cache");
             if (data.pubkey && data.pubkey.bech32) {
                 const pubEl = document.getElementById("providerPubkeyDisplay");
                 if (pubEl) pubEl.textContent = data.pubkey.bech32;
@@ -618,6 +622,7 @@
             }
             // Save admin password (blank disables)
             try {
+                markStage("saving admin password");
                 await fetch(resolveApi("/api/admin-password"), {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -632,9 +637,13 @@
                 const rotated = data.mnemonic_rotated ? "Hotwallet re-imported with new mnemonic. " : "";
                 finalMessage = `${rotated}Saved provider settings${data.provider_settings_path ? ` to ${data.provider_settings_path}` : ""}.`;
             }
+            markStage("refreshing admin info");
             await loadAdminInfo();
+            markStage("refreshing settings");
             await loadProviderSettings(false);
+            markStage("refreshing password status");
             await fetchAdminPasswordStatus(false);
+            console.info(`[save-settings] redirecting (+${Date.now() - saveStarted}ms)`);
             // Redirect to dashboard after successful save
             window.location.href = "index.html";
         } catch (e) {
