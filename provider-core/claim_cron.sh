@@ -3,7 +3,7 @@
 
 set -u
 
-INTERVAL="${CLAIM_CRON_INTERVAL:-60}"  # seconds; default 1 minute
+INTERVAL="${CLAIM_CRON_INTERVAL:-1800}"  # seconds; default 30 minutes
 API_HOST="${ADMIN_API_HOST:-127.0.0.1}"
 API_PORT="${ADMIN_API_PORT:-9999}"
 
