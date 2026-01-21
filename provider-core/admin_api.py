@@ -828,6 +828,17 @@ def _fetch_provider_services_paginated() -> dict:
                 raw_seen = 0
                 last_pagination = {}
                 continue
+            # Handle --limit not supported by retrying without limit
+            if "unknown flag" in out and "limit" in out and per_page_limit:
+                per_page_limit = None
+                page_key = None
+                page = 1
+                pages = 0
+                seen_keys.clear()
+                providers = []
+                raw_seen = 0
+                last_pagination = {}
+                continue
             return {
                 "fetched_at": _timestamp(),
                 "exit_code": code,
@@ -907,6 +918,17 @@ def _fetch_service_types_paginated() -> dict:
                 if not forced_mode:
                     with _PAGE_MODE_LOCK:
                         _SERVICE_TYPES_PAGE_MODE = "page"
+                page_key = None
+                page = 1
+                pages = 0
+                seen_keys.clear()
+                services = []
+                raw_seen = 0
+                last_pagination = {}
+                continue
+            # Handle --limit not supported by retrying without limit
+            if "unknown flag" in out and "limit" in out and per_page_limit:
+                per_page_limit = None
                 page_key = None
                 page = 1
                 pages = 0
@@ -3190,6 +3212,8 @@ def bond_provider():
         ), 500
 
     # Step 3: send the bond-provider tx
+    # For negative bond (unbond), use "--" before the bond value to prevent CLI parsing it as a flag
+    # Flags must come before positional args, with "--" separating them from the negative number
     bond_cmd = [
         "arkeod",
         "--home",
@@ -3197,9 +3221,6 @@ def bond_provider():
         "tx",
         "arkeo",
         "bond-provider",
-        bech32_pubkey,
-        service,
-        bond,
         *NODE_ARGS,
         *CHAIN_ARGS,
         "--from",
@@ -3209,7 +3230,13 @@ def bond_provider():
         "--keyring-backend",
         keyring_backend,
         "-y",
+        bech32_pubkey,
+        service,
     ]
+    if bond.startswith("-"):
+        bond_cmd.extend(["--", bond])
+    else:
+        bond_cmd.append(bond)
     try:
         with tx_lock(timeout_s=45.0):
             code, bond_out = run_list(bond_cmd)
@@ -3272,7 +3299,9 @@ def mod_provider():
 
     sentinel_uri = payload.get("sentinel_uri") or SENTINEL_URI_DEFAULT
     metadata_nonce = str(payload.get("metadata_nonce") or METADATA_NONCE_DEFAULT)
-    status = str(payload.get("status") or "1")
+    # Don't use `or` for status - "0" is a valid value (inactive), not falsy
+    status_val = payload.get("status")
+    status = str(status_val) if status_val is not None else "1"
     min_contract_dur = str(payload.get("min_contract_dur") or "5")
     max_contract_dur = str(payload.get("max_contract_dur") or "432000")
     subscription_rates = payload.get("subscription_rates") or "200uarkeo"
@@ -3283,8 +3312,8 @@ def mod_provider():
         return jsonify({"error": "service is required"}), 400
 
     app.logger.info(
-        "mod-provider start service=%s status=%s sentinel_uri=%s",
-        service, status, sentinel_uri,
+        "mod-provider start service=%s status=%s (raw=%r) sentinel_uri=%s",
+        service, status, payload.get("status"), sentinel_uri,
     )
 
     # Resolve numeric service IDs to the service name (CLI expects name)
@@ -3292,16 +3321,21 @@ def mod_provider():
     if isinstance(service, str) and service.strip().isdigit():
         svc_id = service.strip()
         svc_payload = _fetch_service_types_paginated()
+        app.logger.info("mod-provider resolve svc_id=%s exit_code=%s", svc_id, svc_payload.get("exit_code"))
         if svc_payload.get("exit_code") == 0:
             data = svc_payload.get("data")
             services = _extract_service_types_list(data)
+            app.logger.info("mod-provider resolve services_count=%s", len(services) if isinstance(services, list) else "not-list")
             for item in services if isinstance(services, list) else []:
                 if not isinstance(item, dict):
                     continue
                 sid_val = str(item.get("id") or item.get("service_id") or item.get("serviceID") or "")
                 if sid_val == svc_id:
                     resolved_service = item.get("service") or item.get("name") or svc_id
+                    app.logger.info("mod-provider resolved %s -> %s", svc_id, resolved_service)
                     break
+        else:
+            app.logger.warning("mod-provider failed to fetch service types: %s", svc_payload.get("error") or svc_payload.get("detail"))
 
     raw_pubkey, bech32_pubkey, pubkey_err = derive_pubkeys(user, keyring_backend)
     if pubkey_err:
@@ -3339,6 +3373,8 @@ def mod_provider():
         keyring_backend,
         "-y",
     ]
+
+    app.logger.info("mod-provider cmd=%s", mod_cmd)
 
     try:
         with tx_lock(timeout_s=45.0):
@@ -3393,7 +3429,9 @@ def bond_and_mod_provider():
 
     sentinel_uri = payload.get("sentinel_uri") or SENTINEL_URI_DEFAULT
     metadata_nonce = str(payload.get("metadata_nonce") or METADATA_NONCE_DEFAULT)
-    status = str(payload.get("status") or "1")
+    # Don't use `or` for status - "0" is a valid value (inactive), not falsy
+    status_val = payload.get("status")
+    status = str(status_val) if status_val is not None else "1"
     min_contract_dur = str(payload.get("min_contract_dur") or "5")
     max_contract_dur = str(payload.get("max_contract_dur") or "432000")
     subscription_rates = payload.get("subscription_rates") or "200uarkeo"
@@ -3521,6 +3559,8 @@ def bond_and_mod_provider():
 
     try:
         if not skip_bond:
+            # For negative bond (unbond), use "--" before the bond value to prevent CLI parsing it as a flag
+            # Flags must come before positional args, with "--" separating them from the negative number
             bond_cmd = [
                 "arkeod",
                 "--home",
@@ -3528,9 +3568,6 @@ def bond_and_mod_provider():
                 "tx",
                 "arkeo",
                 "bond-provider",
-                bech32_pubkey,
-                resolved_service,
-                bond,
                 *NODE_ARGS,
                 *CHAIN_ARGS,
                 "--from",
@@ -3540,7 +3577,13 @@ def bond_and_mod_provider():
                 "--keyring-backend",
                 keyring_backend,
                 "-y",
+                bech32_pubkey,
+                resolved_service,
             ]
+            if bond.startswith("-"):
+                bond_cmd.extend(["--", bond])
+            else:
+                bond_cmd.append(bond)
             bond_code, bond_out = run_list(bond_cmd)
             bond_txhash = _log_tx_result(f"bond-mod-provider bond service={resolved_service}", bond_code, bond_out)
             _log_tx_height_async("bond-mod-provider bond", bond_txhash)
@@ -3937,6 +3980,19 @@ def provider_services():
     data = payload.get("data")
     providers = _extract_providers_list(data)
 
+    # Build service ID -> name lookup from service types catalog
+    svc_type_lookup = {}
+    svc_type_payload = _fetch_service_types_paginated()
+    if svc_type_payload.get("exit_code") == 0:
+        svc_types = _extract_service_types_list(svc_type_payload.get("data"))
+        for st in svc_types if isinstance(svc_types, list) else []:
+            if not isinstance(st, dict):
+                continue
+            st_id = st.get("id") or st.get("service_id") or st.get("serviceID")
+            st_name = st.get("service") or st.get("name")
+            if st_id is not None and st_name:
+                svc_type_lookup[str(st_id)] = st_name
+
     matched = []
     for p in providers:
         if not isinstance(p, dict):
@@ -3989,12 +4045,16 @@ def provider_services():
                 # Normalized id/name: if id missing, fall back to service field
                 sid = s.get("service_id") or s.get("id") or s.get("service")
                 sname = s.get("service") or s.get("name")
+                # Resolve service name from catalog if we only have a numeric ID
+                resolved_sname = svc_type_lookup.get(str(sid)) if sid is not None else None
+                if resolved_sname:
+                    sname = resolved_sname
                 bond_val = s.get("bond") or p.get("bond")
                 services.append(
                     {
                         "name": sname,
                         "id": sid,
-                        "service": s.get("service"),
+                        "service": resolved_sname or s.get("service"),
                         "metadata_uri": s.get("metadata_uri") or s.get("metadataUri"),
                         "metadata_nonce": s.get("metadata_nonce") or s.get("metadataNonce"),
                         "status": status_val,
@@ -4018,12 +4078,16 @@ def provider_services():
             status_val = p.get("status")
             sid = p.get("service_id") or p.get("id") or p.get("service")
             sname = p.get("service") or p.get("name")
+            # Resolve service name from catalog if we only have a numeric ID
+            resolved_sname = svc_type_lookup.get(str(sid)) if sid is not None else None
+            if resolved_sname:
+                sname = resolved_sname
             bond_val = p.get("bond")
             services.append(
                 {
                     "name": sname,
                     "id": sid,
-                    "service": p.get("service"),
+                    "service": resolved_sname or p.get("service"),
                     "metadata_uri": p.get("metadata_uri") or p.get("metadataUri"),
                     "metadata_nonce": p.get("metadata_nonce") or p.get("metadataNonce"),
                     "status": status_val,

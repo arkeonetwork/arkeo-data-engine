@@ -301,8 +301,8 @@
                 </td>
                 <td class="value">
                     <select id="wizardServiceStatus">
-                        <option value="1" selected>Active</option>
-                        <option value="0">Inactive</option>
+                        <option value="1" selected>Active (Online)</option>
+                        <option value="0">Inactive (Offline)</option>
                     </select>
                 </td>
             </tr>
@@ -462,6 +462,7 @@
         <a class="btn-ghost" href="index.html" id="wizardCancelBtn">Cancel</a>
         <div class="wizard-nav">
             <button type="button" class="btn-ghost" id="wizardBackBtn" onclick="wizardBack()" style="display:none;">Back</button>
+            <button type="button" class="btn-danger" id="wizardUnbondBtn" onclick="activateUnbondMode()" style="display:none;">Make Inactive &amp; Unbond</button>
             <button type="button" class="primary" id="wizardNextBtn" onclick="wizardNext()">Next</button>
         </div>
     </div>
@@ -1328,8 +1329,12 @@
         const backBtn = document.getElementById("wizardBackBtn");
         const nextBtn = document.getElementById("wizardNextBtn");
         const cancelBtn = document.getElementById("wizardCancelBtn");
+        const unbondBtn = document.getElementById("wizardUnbondBtn");
         const verifyStep = wizardMode === "add" ? 5 : 5;
         const sentinelStep = 4;
+
+        // Hide unbond button by default (only shown on step 1 in edit mode)
+        if (unbondBtn) unbondBtn.style.display = "none";
 
         const minBackStep = wizardMode === "add" ? 0 : 1;
         if (backBtn) backBtn.style.display = wizardCurrentStep > minBackStep && wizardCurrentStep < verifyStep ? "inline-block" : "none";
@@ -1370,6 +1375,20 @@
             cancelBtn.style.visibility = "visible";
             cancelBtn.style.display = "inline-block";
             cancelBtn.textContent = "Cancel";
+            // Show unbond button only on step 1 in edit mode
+            if (unbondBtn && wizardMode === "edit") {
+                unbondBtn.style.display = "inline-block";
+                // Check if unbond mode is already active (bond is negative)
+                const bondInput = document.getElementById("wizardBondAmount");
+                const bondVal = bondInput ? parseInt(bondInput.value, 10) : 0;
+                if (bondVal < 0) {
+                    unbondBtn.textContent = "✓ Unbond Mode Active";
+                    unbondBtn.disabled = true;
+                } else {
+                    unbondBtn.textContent = "Make Inactive & Unbond";
+                    unbondBtn.disabled = false;
+                }
+            }
         } else if (wizardCurrentStep === 0) {
             nextBtn.style.display = "inline-block";
             nextBtn.textContent = "Select Service";
@@ -1397,6 +1416,57 @@
             wizardValidationActive = false; // Reset for step
             updateWizardStepDisplay();
             updateStepStatusNeutral();
+        }
+    }
+
+    const MINIMUM_BOND = 100000000; // 100000000uarkeo minimum bond required for active contracts
+
+    function activateUnbondMode() {
+        // Set bond amount to negative of current bond (to unbond everything and remove contract)
+        const svc = wizardServiceData;
+        if (!svc) return;
+
+        const currentBond = svc.bond || "0";
+        const bondNum = parseInt(currentBond, 10) || 0;
+        if (bondNum <= 0) {
+            alert("No bond to unbond - current bond is " + currentBond);
+            return;
+        }
+
+        // Unbond the full amount - this will remove the contract from the blockchain
+        const unbondAmount = bondNum;
+
+        // Set bond amount to negative (unbond full amount)
+        const bondInput = document.getElementById("wizardBondAmount");
+        if (bondInput) {
+            bondInput.value = "-" + unbondAmount;
+        }
+
+        // Set status to inactive
+        const statusSelect = document.getElementById("wizardServiceStatus");
+        if (statusSelect) {
+            statusSelect.value = "0";
+        }
+
+        // Show confirmation with warning about contract removal
+        alert("Unbond mode activated!\n\nBond amount set to: -" + unbondAmount.toLocaleString() + "uarkeo\nStatus set to: Inactive\n\n⚠️ WARNING: Unbonding the full amount will REMOVE this provider contract from the blockchain entirely. You will need to re-register if you want to use this service again.\n\nContinuing to Bond Contract step...");
+
+        // Mark step 1 as complete and skip to step 2 (Bond Contract)
+        wizardStepResults.step1 = true;
+        wizardCurrentStep = 2;
+        wizardValidationActive = false;
+        updateWizardStepDisplay();
+        updateStepStatusNeutral();
+
+        // Show warning message on bond step
+        showUnbondWarning(unbondAmount);
+    }
+
+    function showUnbondWarning(unbondAmount) {
+        // Add a red warning message to the bond step
+        const bondHint = document.getElementById("wizardBondHint");
+        if (bondHint) {
+            bondHint.innerHTML = '<span style="color: #ef4444; font-weight: 600;">⚠ UNBOND MODE: Withdrawing ' + unbondAmount.toLocaleString() + 'uarkeo. This will REMOVE the contract from the blockchain.</span>';
         }
     }
 

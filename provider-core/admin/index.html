@@ -701,8 +701,8 @@
                     </td>
                     <td class="value">
                         <select id="wizardServiceStatus">
-                            <option value="1" selected>Active</option>
-                            <option value="0">Inactive</option>
+                            <option value="1" selected>Active (Online)</option>
+                            <option value="0">Inactive (Offline)</option>
                         </select>
                     </td>
                 </tr>
@@ -2692,7 +2692,7 @@ function renderProviderServices() {
             const lookupName = lookup && typeof lookup === "object" ? (lookup.name || lookup.label || lookup.service || "") : lookup;
             const resolvedName = (!rawName || rawName === String(rawId) || /^[0-9]+$/.test(rawName)) ? (lookupName || rawName || "") : rawName;
             const resolvedDisplay = lookupDesc || resolvedName;
-            return resolvedDisplay || "";
+            return String(resolvedDisplay || "");
         };
         const da = getDisplay(a).toLowerCase();
         const db = getDisplay(b).toLowerCase();
